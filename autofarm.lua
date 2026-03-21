@@ -15,14 +15,17 @@ pcall(function()
     Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 end)
 if not Rayfield then
-    local s = function() end
-    local t = {CreateToggle=s,CreateSlider=s,CreateButton=s,
-               CreateDropdown=s,CreateLabel=s,CreateSection=s,CreateInput=s}
+    local s = function() return {Set=function()end, SetValue=function()end} end
+    local t = {
+        CreateToggle   = s, CreateSlider  = s, CreateButton  = s,
+        CreateDropdown = s, CreateLabel   = s, CreateSection = s,
+        CreateInput    = s, CreateParagraph = s,
+    }
     Rayfield = {
         CreateWindow = function()
             return setmetatable({},{__index=function() return function() return t end end})
         end,
-        Notify = s,
+        Notify = function() end,
     }
 end
 
@@ -132,17 +135,15 @@ end
 -- Stops hover/pull before starting so nothing fights the tween.
 -- Uses a BodyVelocity pin so physics can't drift the character.
 local _tweenActive = false
-local _tweenBV     = nil
 
 local function StopTween()
     _tweenActive = false
-    -- Clean up BodyVelocity
+    -- Destroy BodyVelocity pin if it still exists
     local hrp = GetHRP()
     if hrp then
         local bv = hrp:FindFirstChild("_FyzeBV")
         if bv then bv:Destroy() end
     end
-    _tweenBV = nil
 end
 
 local function TweenTP(destCF, yExtra)
@@ -181,7 +182,6 @@ local function TweenTP(destCF, yExtra)
     bv.MaxForce     = Vector3.new(1e5, 1e5, 1e5)
     bv.Velocity     = Vector3.zero
     bv.Parent       = hrp
-    _tweenBV        = bv
 
     -- Phase 1: rise above destination
     local d1  = (aboveCF.Position - hrp.Position).Magnitude
@@ -240,6 +240,12 @@ local function PortalTP(destCF)
             hrp.CFrame = CFrame.new(destCF.Position.X, landY, destCF.Position.Z)
         end
     end
+end
+
+-- World-space offset: land 3 studs beside target in X/Z, not local space
+-- (local space CFrame.new(3,0,3) could land inside a wall)
+local function OffsetCF(cf, dx, dz)
+    return CFrame.new(cf.Position + Vector3.new(dx, 0, dz))
 end
 
 -- ════════════════════════════════════
@@ -332,9 +338,19 @@ RunService.Heartbeat:Connect(function()
         if h and h.WalkSpeed ~= WalkSpeedVal then h.WalkSpeed = WalkSpeedVal end
     end)
 end)
-LocalPlayer.CharacterAdded:Connect(function()
-    task.wait(1)
-    if WalkSpeedOn then SetWalkSpeed(true) end
+-- Clean up tween BodyVelocity on respawn (prevents it persisting after death)
+LocalPlayer.CharacterAdded:Connect(function(c)
+    task.wait(0.1)
+    _tweenActive = false
+    local hrp = c:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        local bv = hrp:FindFirstChild("_FyzeBV")
+        if bv then bv:Destroy() end
+    end
+    if WalkSpeedOn then
+        task.wait(1)
+        SetWalkSpeed(true)
+    end
 end)
 
 -- Walk on water: raise WaterBase-Plane collision Y
@@ -919,21 +935,23 @@ FarmTab:CreateToggle({
 })
 
 FarmTab:CreateSection("Status")
-local StatusLabel = FarmTab:CreateLabel("Status: Idle")
-local MobLabel    = FarmTab:CreateLabel("Mob: none")
-local LvlLabel    = FarmTab:CreateLabel("Lvl: ? | HP: ?/?")
+-- Use Paragraph instead of Label — Paragraph.Set is reliable across Rayfield versions
+local StatusLabel = FarmTab:CreateParagraph({Title="Status", Content="Idle"})
+local MobLabel    = FarmTab:CreateParagraph({Title="Mob",    Content="none"})
+local LvlLabel    = FarmTab:CreateParagraph({Title="Info",   Content="Lvl:? HP:?/?"})
+
 task.spawn(function()
     while true do
         task.wait(1)
         pcall(function()
             local h  = GetHum()
-            local hp = h and math.floor(h.Health)   or 0
-            local mx = h and math.floor(h.MaxHealth) or 0
-            local lvl= "?"
-            pcall(function() lvl=tostring(LocalPlayer.Data.Level.Value) end)
-            StatusLabel:Set("Status: "..(AF.Status or "Idle"))
-            MobLabel:Set("Mob: "..(Mon or "none"))
-            LvlLabel:Set(("Lvl:%s | HP:%d/%d"):format(lvl,hp,mx))
+            local hp = h and math.floor(h.Health)    or 0
+            local mx = h and math.floor(h.MaxHealth)  or 0
+            local lvl = "?"
+            pcall(function() lvl = tostring(LocalPlayer.Data.Level.Value) end)
+            pcall(function() StatusLabel:Set({Title="Status", Content=AF.Status or "Idle"}) end)
+            pcall(function() MobLabel:Set({Title="Mob",    Content=Mon or "none"}) end)
+            pcall(function() LvlLabel:Set({Title="Info",   Content=("Lvl:%s HP:%d/%d"):format(lvl,hp,mx)}) end)
         end)
     end
 end)
@@ -1016,21 +1034,17 @@ TPTab:CreateDropdown({
 
 TPTab:CreateButton({
     Name="Teleport to Player",
-    -- Wrap in task.spawn: PortalTP yields (task.wait) which would
-    -- block Rayfield's callback thread and cause errors
     Callback=function()
         task.spawn(function()
             if _selPlayer == "" or _selPlayer == "(none)" then return end
             local found
             for _, p in ipairs(Players:GetPlayers()) do
-                if p.Name == _selPlayer and p ~= LocalPlayer then
-                    found = p; break
-                end
+                if p.Name == _selPlayer and p ~= LocalPlayer then found = p; break end
             end
             if not found then return end
             local char = found.Character; if not char then return end
             local th = char:FindFirstChild("HumanoidRootPart"); if not th then return end
-            PortalTP(th.CFrame * CFrame.new(3, 0, 3))
+            PortalTP(OffsetCF(th.CFrame, 3, 3))
         end)
     end,
 })
@@ -1047,11 +1061,11 @@ TPTab:CreateButton({
 TPTab:CreateSection("Type Name")
 local _typedName = ""
 TPTab:CreateInput({
-    Name="Player Name",
-    Placeholder="Exact username...",
-    ClearTextOnFocus=false,
-    Flag="TypedTPName",
-    Callback=function(v) _typedName = tostring(v) end,
+    Name          = "Player Name",
+    PlaceholderText = "Exact username...",
+    RemoveTextAfterFocusLost = false,
+    Flag          = "TypedTPName",
+    Callback      = function(v) _typedName = tostring(v) end,
 })
 TPTab:CreateButton({
     Name="Teleport to Typed Name",
@@ -1062,7 +1076,7 @@ TPTab:CreateButton({
             if not found or found == LocalPlayer then return end
             local char = found.Character; if not char then return end
             local th = char:FindFirstChild("HumanoidRootPart"); if not th then return end
-            PortalTP(th.CFrame * CFrame.new(3, 0, 3))
+            PortalTP(OffsetCF(th.CFrame, 3, 3))
         end)
     end,
 })
@@ -1071,10 +1085,13 @@ TPTab:CreateSection("Quick")
 TPTab:CreateButton({
     Name="To Sky",
     Callback=function()
-        task.spawn(function()
-            local h = GetHRP(); if not h then return end
-            PortalTP(CFrame.new(h.Position.X, 9999, h.Position.Z))
-        end)
+        -- Direct set to sky — no PortalTP needed, just instant position
+        local h = GetHRP(); if not h then return end
+        local hum = GetHum(); if not hum then return end
+        hum:ChangeState(Enum.HumanoidStateType.FreeFalling)
+        task.wait(0.03)
+        h = GetHRP(); if not h then return end
+        h.CFrame = CFrame.new(h.Position.X, 9999, h.Position.Z)
     end,
 })
 TPTab:CreateButton({
@@ -1092,15 +1109,11 @@ TPTab:CreateButton({
         task.spawn(function()
             local h = GetHRP(); if not h then return end
             local hum = GetHum(); if not hum then return end
-            NoCollide()
             hum:ChangeState(Enum.HumanoidStateType.FreeFalling)
-            task.wait(0.05)
+            task.wait(0.04)
             h = GetHRP(); if not h then return end
-            NoCollide()
+            h.CanCollide = false
             h.CFrame = CFrame.new(h.Position.X, -5000, h.Position.Z)
-            task.wait(0.05)
-            h = GetHRP()
-            if h then h.CFrame = CFrame.new(h.Position.X, -5000, h.Position.Z) end
         end)
     end,
 })
