@@ -126,93 +126,120 @@ local function CheckAndEnter(destPos)
     end
 end
 
--- TweenTP: smooth two-phase lerp.
--- Phase 1: fly UP to destY+20 at 400 st/s (linear)
--- Phase 2: drop DOWN to destY at 200 st/s (quad ease)
--- BodyVelocity pin prevents physics fighting the tween.
--- IMPORTANT: caller must StopHover() before calling this
---            or the hover loop will fight the tween.
+-- TweenTP: smooth two-phase travel for auto farm.
+-- Phase 1: lerp up to destY+25 (rises ABOVE destination first)
+-- Phase 2: lerp down to destY
+-- Stops hover/pull before starting so nothing fights the tween.
+-- Uses a BodyVelocity pin so physics can't drift the character.
 local _tweenActive = false
+local _tweenBV     = nil
 
 local function StopTween()
     _tweenActive = false
+    -- Clean up BodyVelocity
     local hrp = GetHRP()
     if hrp then
         local bv = hrp:FindFirstChild("_FyzeBV")
         if bv then bv:Destroy() end
     end
+    _tweenBV = nil
 end
 
 local function TweenTP(destCF, yExtra)
+    -- Stop any running loops FIRST (must happen before tween)
+    -- (StopFarmLoops is called by the farm logic before calling TweenTP,
+    --  but we also call StopTween here defensively)
     StopTween()
+
     local hrp = GetHRP(); if not hrp then return end
     local hum = GetHum(); if not hum or hum.Health <= 0 then return end
     yExtra = yExtra or 0
 
-    -- Entrance check BEFORE moving
+    -- Entrance portal check before moving
     CheckAndEnter(destCF.Position)
     hrp = GetHRP(); if not hrp then return end
 
-    local destY  = SafeY(destCF.Position.Y) + yExtra
+    -- Target positions
+    local destY   = SafeY(destCF.Position.Y) + yExtra
     local finalCF = CFrame.new(destCF.Position.X, destY, destCF.Position.Z)
-    local aboveCF = CFrame.new(destCF.Position.X, destY + 20, destCF.Position.Z)
+    local aboveCF = CFrame.new(destCF.Position.X, destY + 25, destCF.Position.Z)
 
-    NoCollide()
+    -- Disable collisions once
+    local c = GetChar()
+    if c then
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
+        end
+    end
+
     _tweenActive = true
 
-    -- Pin with BodyVelocity
-    local bv = Instance.new("BodyVelocity")
-    bv.Name     = "_FyzeBV"
-    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-    bv.Velocity = Vector3.zero
-    bv.Parent   = hrp
+    -- Pin character so physics won't move us
+    if hrp:FindFirstChild("_FyzeBV") then hrp:FindFirstChild("_FyzeBV"):Destroy() end
+    local bv        = Instance.new("BodyVelocity")
+    bv.Name         = "_FyzeBV"
+    bv.MaxForce     = Vector3.new(1e5, 1e5, 1e5)
+    bv.Velocity     = Vector3.zero
+    bv.Parent       = hrp
+    _tweenBV        = bv
 
-    -- Phase 1: up
-    local d1 = (aboveCF.Position - hrp.Position).Magnitude
+    -- Phase 1: rise above destination
+    local d1  = (aboveCF.Position - hrp.Position).Magnitude
+    local t1  = math.max(d1 / 420, 0.05)
     local tw1 = TweenService:Create(hrp,
-        TweenInfo.new(math.max(d1/400, 0.05), Enum.EasingStyle.Linear),
+        TweenInfo.new(t1, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
         {CFrame = aboveCF})
-    tw1:Play(); tw1.Completed:Wait()
-    if not _tweenActive then return end
+    tw1:Play()
+    tw1.Completed:Wait()
+    if not _tweenActive then StopTween(); return end
 
-    -- Phase 2: down
+    -- Phase 2: descend to destination
     hrp = GetHRP(); if not hrp then StopTween(); return end
-    local d2 = (finalCF.Position - hrp.Position).Magnitude
+    local d2  = (finalCF.Position - hrp.Position).Magnitude
+    local t2  = math.max(d2 / 220, 0.04)
     local tw2 = TweenService:Create(hrp,
-        TweenInfo.new(math.max(d2/200, 0.04), Enum.EasingStyle.Quad),
+        TweenInfo.new(t2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
         {CFrame = finalCF})
-    tw2:Play(); tw2.Completed:Wait()
+    tw2:Play()
+    tw2.Completed:Wait()
 
     StopTween()
-    NoCollide()
 
-    -- Final water safety check
+    -- Post-arrival cleanup
     hrp = GetHRP()
-    if hrp and hrp.Position.Y < 2 then
-        hrp.CFrame = CFrame.new(hrp.Position.X, 5, hrp.Position.Z)
+    if hrp then
+        -- Water check: if somehow we landed below water, bump up
+        if hrp.Position.Y < 2 then
+            hrp.CFrame = CFrame.new(hrp.Position.X, 5, hrp.Position.Z)
+        end
+        hrp.CanCollide = false
     end
 end
 
--- PortalTP: mimics BF portal teleport.
--- Sets FreeFalling physics state first (stops anti-cheat kick),
--- then snaps CFrame twice for reliability.
--- No entrance check = no bounce-back on player TP.
+-- PortalTP: instant TP using BF portal physics state.
+-- Single authoritative CFrame set — no double-set race condition.
+-- No entrance check so player TP has no bounce-back.
 local function PortalTP(destCF)
     local hrp = GetHRP(); if not hrp then return end
     local hum = GetHum(); if not hum then return end
     local landY = math.max(destCF.Position.Y, 4)
-    NoCollide()
+    -- FreeFalling state = BF portal method, suppresses anti-cheat
     hum:ChangeState(Enum.HumanoidStateType.FreeFalling)
-    task.wait(0.05)
+    task.wait(0.04)
     hrp = GetHRP(); if not hrp then return end
-    NoCollide()
+    hrp.CanCollide = false
     hrp.CFrame = CFrame.new(destCF.Position.X, landY, destCF.Position.Z)
-    task.wait(0.05)
+    -- Brief wait then confirm position (handles server correction)
+    task.wait(0.08)
     hrp = GetHRP()
     if hrp then
-        hrp.CFrame = CFrame.new(destCF.Position.X, landY, destCF.Position.Z)
+        hrp.CanCollide = false
+        local cur = hrp.Position
+        -- Only re-set if server moved us more than 10 studs away
+        if (cur - Vector3.new(destCF.Position.X, landY, destCF.Position.Z)).Magnitude > 10 then
+            hrp.CFrame = CFrame.new(destCF.Position.X, landY, destCF.Position.Z)
+        end
     end
-    NoCollide()
 end
 
 -- ════════════════════════════════════
@@ -607,8 +634,8 @@ local function StopPull()
 end
 local function StopHover()
     if _hoverConn then _hoverConn:Disconnect(); _hoverConn=nil end
-    -- Also kill any in-progress tween
-    StopTween()
+    -- NOTE: do NOT call StopTween here — hover and tween are independent.
+    -- StopTween is only called explicitly by TweenTP itself.
 end
 local function StopFarmLoops()
     StopPull(); StopHover()
@@ -643,9 +670,14 @@ local function StartPull()
                     local s = InfRange and 999 or math.max(AttackRange,30)
                     er.Size=Vector3.new(s,s,s); er.CanCollide=false
                     e.Humanoid.WalkSpeed=0; e.Humanoid.JumpPower=0
-                    local head=e:FindFirstChild("Head"); if head then head.CanCollide=false end
-                    if e.Humanoid:FindFirstChild("Animator") then e.Humanoid.Animator:Destroy() end
-                    pcall(function() sethiddenproperty(LocalPlayer,"SimulationRadius",math.huge) end)
+                    local head=e:FindFirstChild("Head")
+                    if head then head.CanCollide=false end
+                    if e.Humanoid:FindFirstChild("Animator") then
+                        e.Humanoid.Animator:Destroy()
+                    end
+                    pcall(function()
+                        sethiddenproperty(LocalPlayer,"SimulationRadius",math.huge)
+                    end)
                 end
             end
         end)
@@ -654,30 +686,44 @@ end
 
 local function StartHover()
     StopHover()
-    local hp = _hoverPos   -- immutable snapshot
+    local hp = _hoverPos   -- immutable snapshot — fixed Y, never drifts
     _hoverConn = RunService.Heartbeat:Connect(function()
         if not AF.Active then StopHover(); return end
         local hrp = GetHRP(); if not hrp then return end
-        hrp.CFrame = CFrame.new(hp)
-        NoCollide()
-        pcall(function() sethiddenproperty(LocalPlayer,"SimulationRadius",math.huge) end)
+        -- Only correct if drifted more than 1 stud (avoids micro-jitter
+        -- and doesn't interfere with character animations)
+        if (hrp.Position - hp).Magnitude > 1 then
+            hrp.CFrame     = CFrame.new(hp)
+            hrp.CanCollide = false
+        end
+        pcall(function()
+            sethiddenproperty(LocalPlayer,"SimulationRadius",math.huge)
+        end)
     end)
 end
 
 local function RunAutoFarm()
-    if AF.Running then AF.Running=false; task.wait(0.2) end
+    -- Reset running flag cleanly if a previous run is stuck
+    if AF.Running then
+        AF.Running = false
+        task.wait(0.2)
+    end
     AF.Running = true
+
     task.spawn(function()
         while AF.Active do
-            pcall(function()
+            local ok, err = pcall(function()
 
-                -- Dead check
+                -- ① Dead check
                 local hum = GetHum()
                 if not hum or hum.Health <= 0 then
-                    AF.Status="Dead"; StopFarmLoops(); task.wait(4); return
+                    AF.Status = "Dead"
+                    StopFarmLoops()
+                    task.wait(4)
+                    return
                 end
 
-                -- Quest data
+                -- ② Quest data
                 CheckQuest()
                 if not Mon then task.wait(0.3); return end
 
@@ -685,59 +731,66 @@ local function RunAutoFarm()
                 local qEl  = qGui and qGui:FindFirstChild("Quest")
                 local qVis = qEl and qEl.Visible
 
-                -- No quest active
+                -- ③ No quest → travel to NPC and accept
                 if not qVis then
-                    -- MUST stop hover BEFORE calling TweenTP
-                    StopFarmLoops()
+                    StopFarmLoops()   -- stop hover before any tween
                     AF.Status = "Accepting quest"
                     TweenTP(CFrameQuest, 3)
                     task.wait(0.5)
+                    -- Retry once if entrance portal displaced us
                     local hrp = GetHRP()
                     if hrp and (CFrameQuest.Position - hrp.Position).Magnitude > 40 then
-                        TweenTP(CFrameQuest, 3); task.wait(0.4)
+                        TweenTP(CFrameQuest, 3)
+                        task.wait(0.4)
                     end
                     hrp = GetHRP()
                     if hrp and (CFrameQuest.Position - hrp.Position).Magnitude <= 40 then
                         pcall(function()
-                            ReplicatedStorage.Remotes.CommF_:InvokeServer("StartQuest",NameQuest,LevelQuest)
+                            ReplicatedStorage.Remotes.CommF_:InvokeServer(
+                                "StartQuest", NameQuest, LevelQuest)
                         end)
                         task.wait(0.8)
                     end
                     return
                 end
 
-                -- Wrong quest
+                -- ④ Wrong quest active → abandon
                 local title = ""
                 pcall(function() title = qEl.Container.QuestTitle.Title.Text end)
                 if not string.find(title, NameMon or "") then
                     StopFarmLoops()
-                    pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("AbandonQuest") end)
-                    task.wait(0.2); return
+                    pcall(function()
+                        ReplicatedStorage.Remotes.CommF_:InvokeServer("AbandonQuest")
+                    end)
+                    task.wait(0.2)
+                    return
                 end
 
-                -- Find target NPC
+                -- ⑤ Find target NPC
                 local en = workspace:FindFirstChild("Enemies")
                 if not en then task.wait(0.3); return end
                 local target = nil
                 for _, e in ipairs(en:GetChildren()) do
-                    if e.Name==Mon
+                    if e.Name == Mon
                        and e:FindFirstChild("HumanoidRootPart")
                        and e:FindFirstChildOfClass("Humanoid")
                        and e.Humanoid.Health > 0 then
-                        target=e; break
+                        target = e; break
                     end
                 end
 
-                -- No NPC found — travel to spawn zone
+                -- ⑥ No NPC → travel to spawn zone
                 if not target then
-                    -- MUST stop hover BEFORE calling TweenTP
-                    StopFarmLoops()
+                    StopFarmLoops()   -- stop hover before tween
                     AF.Status = "Finding mob"
                     TweenTP(CFrameMon, 5)
-                    task.wait(1.2); return
+                    task.wait(1.2)
+                    return
                 end
 
-                -- Found NPC — set up anchor
+                -- ⑦ Found NPC → lock anchor (MUST stop loops first)
+                StopFarmLoops()
+
                 local er = target:FindFirstChild("HumanoidRootPart")
                 if not er then task.wait(0.15); return end
 
@@ -745,6 +798,7 @@ local function RunAutoFarm()
                 AutoHaki()
                 EquipWeapon(GetWeaponName())
 
+                -- Anchor = NPC ground position (Y-clamped, never changes)
                 local anchorY    = SafeY(er.Position.Y)
                 FarmAnchor       = Vector3.new(er.Position.X, anchorY, er.Position.Z)
                 _pullAnchorCF    = CFrame.new(FarmAnchor)
@@ -752,41 +806,57 @@ local function RunAutoFarm()
                 _pullName        = target.Name
                 MonFarm          = target.Name
 
-                -- Travel to hover position
-                -- StopFarmLoops first so hover doesn't fight the tween
+                -- ⑧ Travel to hover position above anchor
                 local hrp = GetHRP()
                 if hrp and (FarmAnchor - hrp.Position).Magnitude > 10 then
                     AF.Status = "Flying to mob"
-                    StopFarmLoops()   -- critical: kill hover before tweening
+                    -- TweenTP rises above anchor then descends to anchor+HOVER_H
                     TweenTP(CFrame.new(FarmAnchor), HOVER_H)
                     task.wait(0.1)
-                    NoCollide()
                 end
 
+                -- ⑨ Start both Heartbeat loops (anchor is immutable from here)
                 AF.Status = "Farming: " .. Mon
-
-                -- Start both loops (anchor is now fixed, no drift possible)
                 StartHover()
                 StartPull()
 
-                -- Wait for NPC to die
+                -- ⑩ Wait for NPC to die (attack runs in its own Heartbeat)
                 local tick = 0
-                while AF.Active and target and target.Parent
+                while AF.Active
+                      and target and target.Parent
                       and target:FindFirstChildOfClass("Humanoid")
                       and target.Humanoid.Health > 0 do
                     tick = tick + 1
-                    if tick % 10 == 0 then pcall(function() PrepNPC(target) end) end
+                    -- Re-prep NPC occasionally (handles Animator respawn)
+                    if tick % 8 == 0 then
+                        pcall(function() PrepNPC(target) end)
+                    end
+                    -- Re-check quest still visible every 2s
                     if tick % 20 == 0 then
                         if not (qEl and qEl.Visible) then break end
                     end
                     task.wait(0.1)
                 end
 
-                StopFarmLoops(); MonFarm=""; task.wait(0.1)
+                -- NPC dead / quest done
+                StopFarmLoops()
+                MonFarm = ""
+                task.wait(0.1)
             end)
+
+            if not ok then
+                -- Log error but keep running
+                warn("[FyZe] Farm loop error:", err)
+            end
             task.wait(0.05)
         end
-        StopFarmLoops(); MonFarm=""; AF.Status="Idle"; AF.Running=false
+
+        -- Farm toggled off
+        StopFarmLoops()
+        StopTween()
+        MonFarm      = ""
+        AF.Status    = "Idle"
+        AF.Running   = false
     end)
 end
 
