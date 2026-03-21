@@ -590,8 +590,214 @@ local function RunChestFarm()
 end
 
 -- ════════════════════════════════════
---  FARM ENGINE
+--  AUTO FRUIT SNATCHER
+--
+--  Watches for any fruit that spawns in workspace.
+--  When detected:
+--    1. Pauses current farm (stops hover/pull so we can move)
+--    2. NormalTP to the fruit
+--    3. Picks it up by touching it (proximity) + fires storage remote
+--    4. Waits to confirm pickup (fruit disappears)
+--    5. Resumes farm from where it left off
+--
+--  Works independently of auto farm — runs even when farm is off.
 -- ════════════════════════════════════
+local AutoFruitOn    = false   -- toggle state
+local _fruitBusy     = false   -- true while collecting a fruit
+local _pendingFruits = {}      -- queue of fruits to collect {part, model}
+
+-- Known BF fruit name keywords (covers all devil fruits)
+local FRUIT_KEYWORDS = {
+    "fruit","flame","ice","sand","dark","light","rubber","magma","quake",
+    "string","gas","snow","smoke","diamond","barrier","spring","gravity",
+    "love","door","paw","Phoenix","Buddha","dragon","leopard","rumble",
+    "control","soul","venom","mammoth","kitsune","portal","spin","chop",
+    "spike","bomb","rocket","bird","spike","swamp","ghost",
+}
+
+local function IsFruitObj(obj)
+    local n = obj.Name:lower()
+    for _, kw in ipairs(FRUIT_KEYWORDS) do
+        if n:find(kw:lower()) then return true end
+    end
+    return false
+end
+
+-- Get the pickup position of a fruit object
+local function GetFruitPart(obj)
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Tool") then
+        return obj:FindFirstChild("Handle") or obj:FindFirstChildOfClass("BasePart")
+    end
+    if obj:IsA("Model") then
+        return obj.PrimaryPart or obj:FindFirstChildOfClass("BasePart")
+    end
+    return nil
+end
+
+-- Check if object is a spawned world fruit (not in a player backpack/character)
+local function IsWorldFruit(obj)
+    local p = obj.Parent
+    if not p then return false end
+    -- Inside known fruit folders
+    if p.Name == "Fruits" or p.Name == "DroppedFruits" or p.Name == "DevilFruits" then
+        return true
+    end
+    -- Directly in workspace as a Tool or Model
+    if p == workspace then return true end
+    -- Inside a non-player model in workspace
+    if p.Parent == workspace and not p:FindFirstChildOfClass("Humanoid") then
+        return true
+    end
+    return false
+end
+
+-- Queue a fruit for collection
+local function QueueFruit(obj)
+    if not AutoFruitOn then return end
+    local part = GetFruitPart(obj)
+    if not part then return end
+    -- Avoid duplicates
+    for _, f in ipairs(_pendingFruits) do
+        if f.obj == obj then return end
+    end
+    table.insert(_pendingFruits, {obj=obj, part=part})
+end
+
+-- Collect one fruit: TP to it, touch it, fire remote, confirm pickup
+local function CollectFruit(entry)
+    local obj  = entry.obj
+    local part = entry.part
+    if not obj or not obj.Parent then return end   -- already gone
+    if not part or not part.Parent then return end
+
+    local pos = part.Position
+    local hrp = GetHRP(); if not hrp then return end
+
+    -- Pause farm loops so hover doesn't fight our movement
+    local wasFarming = AF.Active and (_hoverConn ~= nil or _pullConn ~= nil)
+    if wasFarming then StopFarmLoops() end
+
+    AF.Status = "Getting fruit: " .. obj.Name
+
+    -- TP directly onto the fruit (triple set)
+    local fx, fy, fz = pos.X, math.max(pos.Y, 4), pos.Z
+    hrp.CFrame = CFrame.new(fx, fy + 3, fz)
+    task.wait()
+    hrp = GetHRP(); if hrp then hrp.CFrame = CFrame.new(fx, fy + 3, fz) end
+    task.wait()
+    hrp = GetHRP(); if hrp then hrp.CFrame = CFrame.new(fx, fy + 3, fz) end
+    task.wait(0.1)
+
+    -- Try every known pickup/storage method
+    -- 1. Touch the fruit part directly (proximity pickup)
+    hrp = GetHRP()
+    if hrp then hrp.CFrame = CFrame.new(fx, fy, fz) end
+    task.wait(0.05)
+
+    -- 2. Fire GetFruit remote (standard BF pickup)
+    pcall(function()
+        ReplicatedStorage.Remotes.CommF_:InvokeServer("GetFruit", obj.Name)
+    end)
+    task.wait(0.05)
+
+    -- 3. Fire GiveFruitPlayer (alt BF storage remote)
+    pcall(function()
+        ReplicatedStorage.Remotes.CommF_:InvokeServer("GiveFruitPlayer", obj)
+    end)
+    task.wait(0.05)
+
+    -- 4. Try FruitNotif (some BF versions use this to register pickup)
+    pcall(function()
+        ReplicatedStorage.Remotes.CommF_:InvokeServer("FruitNotif", obj.Name)
+    end)
+    task.wait(0.05)
+
+    -- 5. Store in fruit storage if it ended up in backpack
+    task.wait(0.3)
+    local c = GetChar()
+    if c then
+        for _, item in ipairs(c:GetChildren()) do
+            if item:IsA("Tool") and IsFruitObj(item) then
+                pcall(function()
+                    ReplicatedStorage.Remotes.CommF_:InvokeServer("StoreFruit", item.Name)
+                end)
+                pcall(function()
+                    ReplicatedStorage.Remotes.CommF_:InvokeServer("SetFruitStorage", item.Name)
+                end)
+            end
+        end
+        for _, item in ipairs(LocalPlayer.Backpack:GetChildren()) do
+            if item:IsA("Tool") and IsFruitObj(item) then
+                pcall(function()
+                    ReplicatedStorage.Remotes.CommF_:InvokeServer("StoreFruit", item.Name)
+                end)
+                pcall(function()
+                    ReplicatedStorage.Remotes.CommF_:InvokeServer("SetFruitStorage", item.Name)
+                end)
+            end
+        end
+    end
+
+    -- Resume farm hover if it was active
+    if wasFarming and AF.Active then
+        StartHover()
+        StartPull()
+    end
+
+    if AF.Active then
+        AF.Status = "Farming: " .. (Mon or "")
+    else
+        AF.Status = "Idle"
+    end
+end
+
+-- Main fruit snatcher loop — processes the queue
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if AutoFruitOn and not _fruitBusy and #_pendingFruits > 0 then
+            _fruitBusy = true
+            local entry = table.remove(_pendingFruits, 1)
+            pcall(CollectFruit, entry)
+            _fruitBusy = false
+        end
+    end
+end)
+
+-- Watch for new fruits spawning in workspace
+workspace.DescendantAdded:Connect(function(obj)
+    if not AutoFruitOn then return end
+    task.wait(0.3)   -- small delay so the object fully loads
+    if not obj or not obj.Parent then return end
+    if not IsFruitObj(obj) then return end
+    if not IsWorldFruit(obj) then return end
+    local part = GetFruitPart(obj)
+    if part then QueueFruit(obj) end
+end)
+
+-- Also scan existing fruits on toggle-on (in case fruits are already in world)
+local function ScanWorldFruits()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        pcall(function()
+            if not IsFruitObj(obj) then return end
+            if not IsWorldFruit(obj) then return end
+            local part = GetFruitPart(obj)
+            if part then QueueFruit(obj) end
+        end)
+    end
+    for _, fname in ipairs({"Fruits","DroppedFruits","DevilFruits"}) do
+        local folder = workspace:FindFirstChild(fname)
+        if folder then
+            for _, obj in ipairs(folder:GetChildren()) do
+                pcall(function()
+                    local part = GetFruitPart(obj)
+                    if part then QueueFruit(obj) end
+                end)
+            end
+        end
+    end
+end
 local HOVER_H       = 12
 local _pullConn     = nil
 local _hoverConn    = nil
@@ -857,9 +1063,21 @@ ChestTab:CreateToggle({
         if v then RunChestFarm() end
     end,
 })
+ChestTab:CreateSection("Auto Fruit Snatcher")
+ChestTab:CreateToggle({
+    Name="Auto Fruit Snatcher", CurrentValue=false, Flag="FruitSnatch",
+    Callback=function(v)
+        AutoFruitOn = v
+        _pendingFruits = {}   -- clear queue on toggle
+        if v then
+            -- Scan for any fruits already in the world
+            ScanWorldFruits()
+        end
+    end,
+})
 ChestTab:CreateParagraph({
-    Title="How it works",
-    Content="Scans workspace for any part/model named Chest, TPs on top, fires open remote, repeats.",
+    Title="Fruit Snatcher",
+    Content="When a devil fruit spawns, auto TPs to it, picks it up and stores it in fruit storage. Works with or without auto farm.",
 })
 
 -- ── Movement Tab ──
