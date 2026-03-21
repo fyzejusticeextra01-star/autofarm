@@ -2,11 +2,14 @@
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
+local TweenService      = game:GetService("TweenService")
 local VIM               = game:GetService("VirtualInputManager")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer       = Players.LocalPlayer
 
--- Rayfield
+-- ════════════════════════════════════
+--  RAYFIELD LOAD
+-- ════════════════════════════════════
 local Rayfield
 pcall(function()
     Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
@@ -33,15 +36,18 @@ end
 local function GetHum()
     local c = GetChar(); return c and c:FindFirstChildOfClass("Humanoid")
 end
+-- Disable all character collisions
 local function NoCollide()
     local c = GetChar(); if not c then return end
     for _, p in ipairs(c:GetDescendants()) do
         if p:IsA("BasePart") then p.CanCollide = false end
     end
 end
+-- Clamp Y above water (BF water surface ~Y=0)
+local function SafeY(y) return math.max(y, 4) end
 
 -- ════════════════════════════════════
---  CACHE ATTACK REMOTES ONCE
+--  CACHE ATTACK REMOTES
 -- ════════════════════════════════════
 local RegAttack, RegHit
 task.spawn(function()
@@ -59,6 +65,7 @@ end)
 local SelectWeapon = "Melee"
 local WalkSpeedVal = 100
 local WalkSpeedOn  = false
+local WalkOnWater  = false
 local HitboxOn     = false
 local AutoHakiOn   = false
 local AntiAFKOn    = false
@@ -82,21 +89,13 @@ local World3 = game.PlaceId == 7449423635
 -- ════════════════════════════════════
 --  TELEPORT SYSTEM
 --
---  TweenTP   — farm travel: smooth lerp tween that
---              rises above dest then descends, runs
---              entrance check, clamps above water.
---              Used by auto farm only.
+--  TweenTP  — smooth farm travel (lerp tween).
+--             Runs entrance check. Used by farm only.
 --
---  PortalTP  — player/quick TP: mimics how BF portals
---              work — sets FreeFalling state then snaps
---              CFrame. Instant, no bounce-back, no sky.
+--  PortalTP — instant player/manual TP using BF
+--             FreeFalling state (no bounce-back,
+--             no entrance check).
 -- ════════════════════════════════════
-
-local TweenService = game:GetService("TweenService")
-
--- Clamp Y above water surface
-local function SafeY(y) return math.max(y, 4) end
-
 local EntranceZones = {
     [2753915549] = {
         { thr=1200, zone=Vector3.new(-7894.6,5547.1,-380.3),  entry=Vector3.new(-7894.6,5547.1,-380.3) },
@@ -127,11 +126,13 @@ local function CheckAndEnter(destPos)
     end
 end
 
--- TweenTP: smooth lerp travel used by auto farm.
--- Steps: entrance check → rise 20 studs above dest → lerp down to dest.
--- Uses a BodyVelocity pin so physics doesn't fight the tween.
+-- TweenTP: smooth two-phase lerp.
+-- Phase 1: fly UP to destY+20 at 400 st/s (linear)
+-- Phase 2: drop DOWN to destY at 200 st/s (quad ease)
+-- BodyVelocity pin prevents physics fighting the tween.
+-- IMPORTANT: caller must StopHover() before calling this
+--            or the hover loop will fight the tween.
 local _tweenActive = false
-local _tweenBV     = nil
 
 local function StopTween()
     _tweenActive = false
@@ -140,7 +141,6 @@ local function StopTween()
         local bv = hrp:FindFirstChild("_FyzeBV")
         if bv then bv:Destroy() end
     end
-    _tweenBV = nil
 end
 
 local function TweenTP(destCF, yExtra)
@@ -149,82 +149,74 @@ local function TweenTP(destCF, yExtra)
     local hum = GetHum(); if not hum or hum.Health <= 0 then return end
     yExtra = yExtra or 0
 
-    -- Entrance portal check first
+    -- Entrance check BEFORE moving
     CheckAndEnter(destCF.Position)
     hrp = GetHRP(); if not hrp then return end
 
-    -- Safe destination Y
-    local destY = SafeY(destCF.Position.Y) + yExtra
+    local destY  = SafeY(destCF.Position.Y) + yExtra
     local finalCF = CFrame.new(destCF.Position.X, destY, destCF.Position.Z)
+    local aboveCF = CFrame.new(destCF.Position.X, destY + 20, destCF.Position.Z)
 
-    -- Pin character with BodyVelocity so physics won't push us around
     NoCollide()
     _tweenActive = true
+
+    -- Pin with BodyVelocity
     local bv = Instance.new("BodyVelocity")
     bv.Name     = "_FyzeBV"
     bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
     bv.Velocity = Vector3.zero
     bv.Parent   = hrp
-    _tweenBV    = bv
 
-    -- Phase 1: lerp to 20 studs above destination
-    local aboveCF = CFrame.new(destCF.Position.X, destY + 20, destCF.Position.Z)
-    local dist1   = (aboveCF.Position - hrp.Position).Magnitude
-    local t1      = math.max(dist1 / 400, 0.05)
-    local tw1     = TweenService:Create(hrp, TweenInfo.new(t1, Enum.EasingStyle.Linear), {CFrame = aboveCF})
-    tw1:Play()
-    tw1.Completed:Wait()
+    -- Phase 1: up
+    local d1 = (aboveCF.Position - hrp.Position).Magnitude
+    local tw1 = TweenService:Create(hrp,
+        TweenInfo.new(math.max(d1/400, 0.05), Enum.EasingStyle.Linear),
+        {CFrame = aboveCF})
+    tw1:Play(); tw1.Completed:Wait()
     if not _tweenActive then return end
 
-    -- Phase 2: lerp down to final position
+    -- Phase 2: down
     hrp = GetHRP(); if not hrp then StopTween(); return end
-    local dist2 = (finalCF.Position - hrp.Position).Magnitude
-    local t2    = math.max(dist2 / 200, 0.04)
-    local tw2   = TweenService:Create(hrp, TweenInfo.new(t2, Enum.EasingStyle.Quad), {CFrame = finalCF})
-    tw2:Play()
-    tw2.Completed:Wait()
+    local d2 = (finalCF.Position - hrp.Position).Magnitude
+    local tw2 = TweenService:Create(hrp,
+        TweenInfo.new(math.max(d2/200, 0.04), Enum.EasingStyle.Quad),
+        {CFrame = finalCF})
+    tw2:Play(); tw2.Completed:Wait()
 
     StopTween()
     NoCollide()
-    -- Water safety check after landing
+
+    -- Final water safety check
     hrp = GetHRP()
     if hrp and hrp.Position.Y < 2 then
         hrp.CFrame = CFrame.new(hrp.Position.X, 5, hrp.Position.Z)
     end
 end
 
--- PortalTP: instant teleport using BF's own portal state method.
--- Sets the humanoid to FreeFalling (state 11) which is exactly what
--- BF portals do, then snaps CFrame. No entrance check = no bounce-back.
+-- PortalTP: mimics BF portal teleport.
+-- Sets FreeFalling physics state first (stops anti-cheat kick),
+-- then snaps CFrame twice for reliability.
+-- No entrance check = no bounce-back on player TP.
 local function PortalTP(destCF)
     local hrp = GetHRP(); if not hrp then return end
     local hum = GetHum(); if not hum then return end
+    local landY = math.max(destCF.Position.Y, 4)
     NoCollide()
-    -- Set physics state to FreeFalling — same as how BF portals teleport
     hum:ChangeState(Enum.HumanoidStateType.FreeFalling)
-    task.wait()
+    task.wait(0.05)
     hrp = GetHRP(); if not hrp then return end
     NoCollide()
-    hrp.CFrame = CFrame.new(
-        destCF.Position.X,
-        math.max(destCF.Position.Y, 4),
-        destCF.Position.Z
-    )
-    task.wait()
-    -- Second set to guarantee position sticks
+    hrp.CFrame = CFrame.new(destCF.Position.X, landY, destCF.Position.Z)
+    task.wait(0.05)
     hrp = GetHRP()
     if hrp then
-        hrp.CFrame = CFrame.new(
-            destCF.Position.X,
-            math.max(destCF.Position.Y, 4),
-            destCF.Position.Z
-        )
+        hrp.CFrame = CFrame.new(destCF.Position.X, landY, destCF.Position.Z)
     end
     NoCollide()
 end
 
 -- ════════════════════════════════════
---  ATTACK  (Heartbeat — fastest possible)
+--  ATTACK (Heartbeat — every frame)
 -- ════════════════════════════════════
 local function FindHits()
     local c = LocalPlayer.Character; if not c then return nil, {} end
@@ -238,7 +230,6 @@ local function FindHits()
             if hu and hu.Health > 0 and not e:GetAttribute("IsBoat") then
                 local head = e:FindFirstChild("Head")
                 if head and (origin - head.Position).Magnitude <= range then
-                    -- format each entry as a flat {model, head} table
                     table.insert(hits, {e, head})
                     last = head
                 end
@@ -262,22 +253,16 @@ local function AttackNoCoolDown()
     if not GetEquippedTool() then return end
     local last, hits = FindHits()
     if not last or #hits == 0 then return end
-    -- Fire register-attack with near-zero time (bypasses cooldown)
     pcall(function() RegAttack:FireServer(1e-9) end)
-    -- Fire register-hit: pass the full hits array so ALL NPCs take damage at once
-    -- The server iterates the table — sending all at once = multi-NPC damage
     pcall(function() RegHit:FireServer(last, hits) end)
 end
 
--- Attack on Heartbeat — every frame, fastest possible
 RunService.Heartbeat:Connect(function()
-    if AF.Active and AutoAttackOn then
-        pcall(AttackNoCoolDown)
-    end
+    if AutoAttackOn then pcall(AttackNoCoolDown) end
 end)
 
 -- ════════════════════════════════════
---  MISC
+--  MISC HELPERS
 -- ════════════════════════════════════
 local function AutoHaki()
     pcall(function()
@@ -305,51 +290,44 @@ local function EquipWeapon(name)
     if t then local h=GetHum() if h then h:EquipTool(t) end end
 end
 
-local WalkOnWater = false
-
-local function ApplyWalkSpeed(on)
+-- Walk speed: persistent Heartbeat loop so BF can't reset it
+local function SetWalkSpeed(on)
     WalkSpeedOn = on
     pcall(function()
         local h = GetHum()
         if h then h.WalkSpeed = on and WalkSpeedVal or 16 end
     end)
 end
-
--- Persistent walk speed loop — reapplies every frame because BF resets it
 RunService.Heartbeat:Connect(function()
     if not WalkSpeedOn then return end
     pcall(function()
         local h = GetHum()
-        if h then h.WalkSpeed = WalkSpeedVal end
+        if h and h.WalkSpeed ~= WalkSpeedVal then h.WalkSpeed = WalkSpeedVal end
     end)
 end)
-
--- Reapply after respawn
 LocalPlayer.CharacterAdded:Connect(function()
     task.wait(1)
-    if WalkSpeedOn then ApplyWalkSpeed(true) end
+    if WalkSpeedOn then SetWalkSpeed(true) end
 end)
 
--- Walk on water: raise WaterBase-Plane so player stands on it
+-- Walk on water: raise WaterBase-Plane collision Y
+-- Only modifies when active, restores original on toggle off
+local _waterOrigSize = nil
 RunService.Heartbeat:Connect(function()
     if not WalkOnWater then return end
     pcall(function()
-        local wb = workspace:FindFirstChild("Map")
-            and workspace.Map:FindFirstChild("WaterBase-Plane")
-        if wb then
+        local map = workspace:FindFirstChild("Map"); if not map then return end
+        local wb  = map:FindFirstChild("WaterBase-Plane"); if not wb then return end
+        if not _waterOrigSize then _waterOrigSize = wb.Size end
+        -- Raise Y from ~80 to 112 so surface is walkable
+        if wb.Size.Y < 110 then
             wb.Size = Vector3.new(wb.Size.X, 112, wb.Size.Z)
-            wb.CanCollide = true
         end
+        wb.CanCollide = true
     end)
 end)
 
-task.spawn(function()
-    while true do
-        if AutoHakiOn then AutoHaki() end
-        task.wait(12)
-    end
-end)
-
+-- Anti AFK
 task.spawn(function()
     while true do
         task.wait(60)
@@ -363,11 +341,20 @@ task.spawn(function()
     end
 end)
 
+-- Auto Haki loop
+task.spawn(function()
+    while true do
+        if AutoHakiOn then AutoHaki() end
+        task.wait(12)
+    end
+end)
+
+-- Global hitbox expand
 RunService.Heartbeat:Connect(function()
     if not HitboxOn then return end
     pcall(function()
         local en = workspace:FindFirstChild("Enemies"); if not en then return end
-        local s  = InfRange and 999 or math.max(AttackRange, 30)
+        local s  = InfRange and 999 or math.max(AttackRange,30)
         for _, e in ipairs(en:GetChildren()) do
             local hrp = e:FindFirstChild("HumanoidRootPart")
             if hrp and hrp.Size.X < s then
@@ -402,7 +389,9 @@ local function MakeFruitBB(adornee, label)
     end)
 end
 local function ClearFruitBBs()
-    for a,bb in pairs(FruitBBs) do pcall(function() bb:Destroy() end); FruitBBs[a]=nil end
+    for a,bb in pairs(FruitBBs) do
+        pcall(function() bb:Destroy() end); FruitBBs[a]=nil
+    end
 end
 local function ScanFruits()
     if not FruitESPOn then return end
@@ -414,8 +403,8 @@ local function ScanFruits()
         elseif obj:IsA("BasePart") then ad = obj end
         if ad then MakeFruitBB(ad, obj.Name) end
     end
-    for _, o in ipairs(workspace:GetChildren()) do TryTag(o) end
-    for _, fn in ipairs({"Fruits","DevilFruits","DroppedFruits"}) do
+    for _,o in ipairs(workspace:GetChildren()) do TryTag(o) end
+    for _,fn in ipairs({"Fruits","DevilFruits","DroppedFruits"}) do
         local f=workspace:FindFirstChild(fn)
         if f then for _,o in ipairs(f:GetChildren()) do TryTag(o) end end
     end
@@ -446,7 +435,6 @@ local ESPObj = {}
 local C_W = Color3.fromRGB(255,255,255)
 local C_G = Color3.fromRGB(80,255,120)
 local C_R = Color3.fromRGB(255,60,60)
-
 local function AddESP(p)
     if p==LocalPlayer then return end
     ESPObj[p]={}
@@ -597,6 +585,16 @@ end
 -- ════════════════════════════════════
 --  FARM ENGINE
 -- ════════════════════════════════════
+--[[
+  FarmAnchor = fixed Vector3 captured once when NPC found.
+  Pull loop  = snaps ALL matching NPCs to FarmAnchor every frame.
+  Hover loop = locks player to FarmAnchor + HOVER_H every frame.
+
+  KEY FIX for sky glitch:
+    StopFarmLoops() (which calls StopHover) is called BEFORE
+    every TweenTP call. Without this the hover Heartbeat fights
+    the tween and launches the player upward indefinitely.
+]]
 local HOVER_H       = 12
 local _pullConn     = nil
 local _hoverConn    = nil
@@ -609,6 +607,8 @@ local function StopPull()
 end
 local function StopHover()
     if _hoverConn then _hoverConn:Disconnect(); _hoverConn=nil end
+    -- Also kill any in-progress tween
+    StopTween()
 end
 local function StopFarmLoops()
     StopPull(); StopHover()
@@ -625,7 +625,7 @@ end
 
 local function StartPull()
     StopPull()
-    local cf   = _pullAnchorCF
+    local cf   = _pullAnchorCF   -- immutable snapshot
     local name = _pullName
     local mon  = Mon
     _pullConn = RunService.Heartbeat:Connect(function()
@@ -654,7 +654,7 @@ end
 
 local function StartHover()
     StopHover()
-    local hp = _hoverPos
+    local hp = _hoverPos   -- immutable snapshot
     _hoverConn = RunService.Heartbeat:Connect(function()
         if not AF.Active then StopHover(); return end
         local hrp = GetHRP(); if not hrp then return end
@@ -665,17 +665,19 @@ local function StartHover()
 end
 
 local function RunAutoFarm()
-    if AF.Running then AF.Running=false; task.wait(0.15) end
+    if AF.Running then AF.Running=false; task.wait(0.2) end
     AF.Running = true
     task.spawn(function()
         while AF.Active do
             pcall(function()
 
+                -- Dead check
                 local hum = GetHum()
                 if not hum or hum.Health <= 0 then
                     AF.Status="Dead"; StopFarmLoops(); task.wait(4); return
                 end
 
+                -- Quest data
                 CheckQuest()
                 if not Mon then task.wait(0.3); return end
 
@@ -683,24 +685,23 @@ local function RunAutoFarm()
                 local qEl  = qGui and qGui:FindFirstChild("Quest")
                 local qVis = qEl and qEl.Visible
 
-                -- No quest
+                -- No quest active
                 if not qVis then
+                    -- MUST stop hover BEFORE calling TweenTP
                     StopFarmLoops()
                     AF.Status = "Accepting quest"
                     TweenTP(CFrameQuest, 3)
                     task.wait(0.5)
                     local hrp = GetHRP()
-                    if hrp then
-                        if (CFrameQuest.Position - hrp.Position).Magnitude > 40 then
-                            TweenTP(CFrameQuest, 3); task.wait(0.4)
-                        end
-                        hrp = GetHRP()
-                        if hrp and (CFrameQuest.Position - hrp.Position).Magnitude <= 40 then
-                            pcall(function()
-                                ReplicatedStorage.Remotes.CommF_:InvokeServer("StartQuest",NameQuest,LevelQuest)
-                            end)
-                            task.wait(0.8)
-                        end
+                    if hrp and (CFrameQuest.Position - hrp.Position).Magnitude > 40 then
+                        TweenTP(CFrameQuest, 3); task.wait(0.4)
+                    end
+                    hrp = GetHRP()
+                    if hrp and (CFrameQuest.Position - hrp.Position).Magnitude <= 40 then
+                        pcall(function()
+                            ReplicatedStorage.Remotes.CommF_:InvokeServer("StartQuest",NameQuest,LevelQuest)
+                        end)
+                        task.wait(0.8)
                     end
                     return
                 end
@@ -714,7 +715,7 @@ local function RunAutoFarm()
                     task.wait(0.2); return
                 end
 
-                -- Find NPC
+                -- Find target NPC
                 local en = workspace:FindFirstChild("Enemies")
                 if not en then task.wait(0.3); return end
                 local target = nil
@@ -727,15 +728,16 @@ local function RunAutoFarm()
                     end
                 end
 
-                -- No NPC
+                -- No NPC found — travel to spawn zone
                 if not target then
+                    -- MUST stop hover BEFORE calling TweenTP
                     StopFarmLoops()
                     AF.Status = "Finding mob"
                     TweenTP(CFrameMon, 5)
                     task.wait(1.2); return
                 end
 
-                -- Set up anchor
+                -- Found NPC — set up anchor
                 local er = target:FindFirstChild("HumanoidRootPart")
                 if not er then task.wait(0.15); return end
 
@@ -743,7 +745,6 @@ local function RunAutoFarm()
                 AutoHaki()
                 EquipWeapon(GetWeaponName())
 
-                -- Anchor = NPC position, safely above water
                 local anchorY    = SafeY(er.Position.Y)
                 FarmAnchor       = Vector3.new(er.Position.X, anchorY, er.Position.Z)
                 _pullAnchorCF    = CFrame.new(FarmAnchor)
@@ -751,20 +752,24 @@ local function RunAutoFarm()
                 _pullName        = target.Name
                 MonFarm          = target.Name
 
-                -- Fly to hover position using smooth tween
+                -- Travel to hover position
+                -- StopFarmLoops first so hover doesn't fight the tween
                 local hrp = GetHRP()
                 if hrp and (FarmAnchor - hrp.Position).Magnitude > 10 then
                     AF.Status = "Flying to mob"
-                    -- TweenTP handles entrance, rises above then descends
+                    StopFarmLoops()   -- critical: kill hover before tweening
                     TweenTP(CFrame.new(FarmAnchor), HOVER_H)
-                    task.wait(0.1); NoCollide()
+                    task.wait(0.1)
+                    NoCollide()
                 end
 
                 AF.Status = "Farming: " .. Mon
+
+                -- Start both loops (anchor is now fixed, no drift possible)
                 StartHover()
                 StartPull()
 
-                -- Wait for NPC to die (attack handled by Heartbeat loop)
+                -- Wait for NPC to die
                 local tick = 0
                 while AF.Active and target and target.Parent
                       and target:FindFirstChildOfClass("Humanoid")
@@ -797,21 +802,22 @@ local Window = Rayfield:CreateWindow({
     KeySystem        = false,
 })
 
--- Farm Tab
+-- ── Farm Tab ──────────────────────────────────
 local FarmTab = Window:CreateTab("Farm", 4483362458)
 
 FarmTab:CreateSection("Weapon")
 FarmTab:CreateDropdown({
     Name="Weapon Type", Options={"Melee","Sword","Gun","Blox Fruit"},
     CurrentOption="Melee", Flag="Weapon",
-    Callback=function(v) SelectWeapon=v end,
+    -- Rayfield passes the selected string directly
+    Callback=function(v) SelectWeapon = tostring(v) end,
 })
 
 FarmTab:CreateSection("Auto Farm")
 FarmTab:CreateToggle({
     Name="Auto Farm", CurrentValue=false, Flag="AutoFarm",
     Callback=function(v)
-        AF.Active=v
+        AF.Active = v
         if v then RunAutoFarm()
         else StopFarmLoops(); MonFarm=""; AF.Status="Idle" end
     end,
@@ -862,28 +868,40 @@ task.spawn(function()
     end
 end)
 
--- Movement Tab
+-- ── Movement Tab ──────────────────────────────
 local MoveTab = Window:CreateTab("Movement", 4483362458)
 MoveTab:CreateSection("Speed")
 MoveTab:CreateToggle({
     Name="Fast Walk", CurrentValue=false, Flag="FastWalk",
-    Callback=function(v) ApplyWalkSpeed(v) end,
+    Callback=function(v) SetWalkSpeed(v) end,
 })
 MoveTab:CreateSlider({
     Name="Walk Speed", Range={16,500}, Increment=10, Suffix=" sp",
     CurrentValue=100, Flag="WalkSpeed",
-    Callback=function(v) WalkSpeedVal=v; if WalkSpeedOn then ApplyWalkSpeed(true) end end,
+    Callback=function(v)
+        WalkSpeedVal = v
+        -- Immediately apply if walk speed is active
+        if WalkSpeedOn then
+            pcall(function()
+                local h = GetHum()
+                if h then h.WalkSpeed = WalkSpeedVal end
+            end)
+        end
+    end,
 })
+
 MoveTab:CreateSection("Other")
 MoveTab:CreateToggle({
     Name="Walk on Water", CurrentValue=false, Flag="WalkOnWater",
     Callback=function(v)
         WalkOnWater = v
         if not v then
-            -- Restore water plane to original sunken size
+            -- Restore water plane to original depth
             pcall(function()
-                local wb = workspace.Map:FindFirstChild("WaterBase-Plane")
-                if wb then wb.Size = Vector3.new(wb.Size.X, 80, wb.Size.Z) end
+                local map = workspace:FindFirstChild("Map"); if not map then return end
+                local wb  = map:FindFirstChild("WaterBase-Plane"); if not wb then return end
+                local origY = _waterOrigSize and _waterOrigSize.Y or 80
+                wb.Size = Vector3.new(wb.Size.X, origY, wb.Size.Z)
             end)
         end
     end,
@@ -899,73 +917,83 @@ MoveTab:CreateButton({
     end,
 })
 
--- Teleport Tab
+-- ── Teleport Tab ──────────────────────────────
 local TPTab = Window:CreateTab("Teleport", 4483362458)
 
 TPTab:CreateSection("Player Teleport")
 
-local _selPlayer = ""
+local _selPlayer = "(none)"
 local function GetPlayerNames()
-    local n={}
-    for _,p in ipairs(Players:GetPlayers()) do
-        if p~=LocalPlayer then table.insert(n,p.Name) end
+    local n = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then table.insert(n, p.Name) end
     end
-    return #n>0 and n or {"(none)"}
+    return #n > 0 and n or {"(none)"}
 end
-local _initN = GetPlayerNames()
-_selPlayer   = _initN[1]
+
+-- Build initial list
+local _initNames = GetPlayerNames()
+_selPlayer = _initNames[1]
 
 TPTab:CreateDropdown({
-    Name="Select Player", Options=_initN, CurrentOption=_initN[1],
+    Name="Select Player",
+    Options=_initNames,
+    CurrentOption=_initNames[1],
     Flag="TPPlayerDrop",
-    Callback=function(v) _selPlayer=v end,
+    -- Store selection — Rayfield passes a string
+    Callback=function(v) _selPlayer = tostring(v) end,
 })
 
 TPTab:CreateButton({
     Name="Teleport to Player",
+    -- Wrap in task.spawn: PortalTP yields (task.wait) which would
+    -- block Rayfield's callback thread and cause errors
     Callback=function()
-        if _selPlayer=="" or _selPlayer=="(none)" then return end
-        local found
-        for _,p in ipairs(Players:GetPlayers()) do
-            if p.Name==_selPlayer and p~=LocalPlayer then found=p; break end
-        end
-        if not found or not found.Character then
-            Rayfield:Notify({Title="FyZe Hub",Content="Player not found.",Duration=2}); return
-        end
-        local th = found.Character:FindFirstChild("HumanoidRootPart")
-        if not th then return end
-        -- Use PortalTP — same method BF portals use, no bounce-back
-        PortalTP(th.CFrame * CFrame.new(3,0,3))
+        task.spawn(function()
+            if _selPlayer == "" or _selPlayer == "(none)" then return end
+            local found
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Name == _selPlayer and p ~= LocalPlayer then
+                    found = p; break
+                end
+            end
+            if not found then return end
+            local char = found.Character; if not char then return end
+            local th = char:FindFirstChild("HumanoidRootPart"); if not th then return end
+            PortalTP(th.CFrame * CFrame.new(3, 0, 3))
+        end)
     end,
 })
 
 TPTab:CreateButton({
     Name="Refresh List",
     Callback=function()
-        local n=GetPlayerNames(); _selPlayer=n[1]
-        Rayfield:Notify({Title="FyZe Hub",Content="Refreshed. "..#n.." player(s).",Duration=2})
+        local n = GetPlayerNames()
+        _selPlayer = n[1]
+        Rayfield:Notify({Title="FyZe Hub", Content="Refreshed. "..#n.." player(s).", Duration=2})
     end,
 })
 
 TPTab:CreateSection("Type Name")
-local _typedName=""
+local _typedName = ""
 TPTab:CreateInput({
     Name="Player Name",
-    PlaceholderText="Exact name...",
-    RemoveTextAfterFocusLost=false,
+    Placeholder="Exact username...",
+    ClearTextOnFocus=false,
     Flag="TypedTPName",
-    Callback=function(v) _typedName=v end,
+    Callback=function(v) _typedName = tostring(v) end,
 })
 TPTab:CreateButton({
     Name="Teleport to Typed Name",
     Callback=function()
-        if _typedName=="" then return end
-        local found=Players:FindFirstChild(_typedName)
-        if not found or found==LocalPlayer or not found.Character then
-            Rayfield:Notify({Title="FyZe Hub",Content="Not found: ".._typedName,Duration=2}); return
-        end
-        local th=found.Character:FindFirstChild("HumanoidRootPart"); if not th then return end
-        PortalTP(th.CFrame * CFrame.new(3,0,3))
+        task.spawn(function()
+            if _typedName == "" then return end
+            local found = Players:FindFirstChild(_typedName)
+            if not found or found == LocalPlayer then return end
+            local char = found.Character; if not char then return end
+            local th = char:FindFirstChild("HumanoidRootPart"); if not th then return end
+            PortalTP(th.CFrame * CFrame.new(3, 0, 3))
+        end)
     end,
 })
 
@@ -973,46 +1001,56 @@ TPTab:CreateSection("Quick")
 TPTab:CreateButton({
     Name="To Sky",
     Callback=function()
-        local h=GetHRP(); if not h then return end
-        PortalTP(CFrame.new(h.Position.X, 9999, h.Position.Z))
+        task.spawn(function()
+            local h = GetHRP(); if not h then return end
+            PortalTP(CFrame.new(h.Position.X, 9999, h.Position.Z))
+        end)
     end,
 })
 TPTab:CreateButton({
     Name="To Ground",
     Callback=function()
-        local h=GetHRP(); if not h then return end
-        PortalTP(CFrame.new(h.Position.X, 5, h.Position.Z))
+        task.spawn(function()
+            local h = GetHRP(); if not h then return end
+            PortalTP(CFrame.new(h.Position.X, 5, h.Position.Z))
+        end)
     end,
 })
 TPTab:CreateButton({
     Name="To Void",
     Callback=function()
-        local h=GetHRP(); if not h then return end
-        local hum=GetHum(); if not hum then return end
-        NoCollide()
-        hum:ChangeState(Enum.HumanoidStateType.FreeFalling)
-        task.wait()
-        h=GetHRP(); if not h then return end
-        NoCollide()
-        h.CFrame=CFrame.new(h.Position.X,-5000,h.Position.Z)
-        task.wait()
-        h=GetHRP(); if h then h.CFrame=CFrame.new(h.Position.X,-5000,h.Position.Z) end
+        task.spawn(function()
+            local h = GetHRP(); if not h then return end
+            local hum = GetHum(); if not hum then return end
+            NoCollide()
+            hum:ChangeState(Enum.HumanoidStateType.FreeFalling)
+            task.wait(0.05)
+            h = GetHRP(); if not h then return end
+            NoCollide()
+            h.CFrame = CFrame.new(h.Position.X, -5000, h.Position.Z)
+            task.wait(0.05)
+            h = GetHRP()
+            if h then h.CFrame = CFrame.new(h.Position.X, -5000, h.Position.Z) end
+        end)
     end,
 })
 
--- ESP Tab
+-- ── ESP Tab ───────────────────────────────────
 local ESPTab = Window:CreateTab("ESP", 4483362458)
 ESPTab:CreateSection("Player")
-ESPTab:CreateToggle({Name="Player ESP",    CurrentValue=true,  Flag="ESPOn",     Callback=function(v) ESPOn=v end})
-ESPTab:CreateToggle({Name="Show Names",    CurrentValue=true,  Flag="ESPNames",  Callback=function(v) ShowName=v end})
-ESPTab:CreateToggle({Name="Show Health",   CurrentValue=true,  Flag="ESPHealth", Callback=function(v) ShowHealth=v end})
+ESPTab:CreateToggle({Name="Player ESP",  CurrentValue=true,  Flag="ESPOn",     Callback=function(v) ESPOn=v end})
+ESPTab:CreateToggle({Name="Show Names",  CurrentValue=true,  Flag="ESPNames",  Callback=function(v) ShowName=v end})
+ESPTab:CreateToggle({Name="Show Health", CurrentValue=true,  Flag="ESPHealth", Callback=function(v) ShowHealth=v end})
 ESPTab:CreateSection("World")
 ESPTab:CreateToggle({
     Name="Fruit ESP", CurrentValue=false, Flag="FruitESP",
-    Callback=function(v) FruitESPOn=v; if v then ScanFruits() else ClearFruitBBs() end end,
+    Callback=function(v)
+        FruitESPOn = v
+        if v then ScanFruits() else ClearFruitBBs() end
+    end,
 })
 
--- Misc Tab
+-- ── Misc Tab ──────────────────────────────────
 local MiscTab = Window:CreateTab("Misc", 4483362458)
 MiscTab:CreateSection("Game")
 MiscTab:CreateToggle({
@@ -1032,6 +1070,7 @@ MiscTab:CreateToggle({
         end)
     end,
 })
+
 MiscTab:CreateSection("Team")
 MiscTab:CreateButton({Name="Pirates", Callback=function()
     pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("SetTeam","Pirates") end)
@@ -1039,6 +1078,7 @@ end})
 MiscTab:CreateButton({Name="Marines", Callback=function()
     pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("SetTeam","Marines") end)
 end})
+
 MiscTab:CreateSection("Shop")
 MiscTab:CreateButton({Name="Buy Geppo", Callback=function()
     pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("BuyHaki","Geppo") end)
@@ -1049,33 +1089,42 @@ end})
 MiscTab:CreateButton({Name="Buy Ken", Callback=function()
     pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("KenTalk","Buy") end)
 end})
+
 MiscTab:CreateSection("Codes")
 MiscTab:CreateButton({
     Name="Redeem All Codes",
     Callback=function()
-        local codes={"KITT_RESET","Sub2UncleKizaru","SUB2GAMERROBOT_RESET1","Sub2Fer999",
+        local codes = {
+            "KITT_RESET","Sub2UncleKizaru","SUB2GAMERROBOT_RESET1","Sub2Fer999",
             "Enyu_is_Pro","JCWK","StarcodeHEO","MagicBus","KittGaming","Sub2CaptainMaui",
             "Sub2OfficalNoobie","TheGreatAce","Sub2NoobMaster123","Sub2Daigrock","Axiore",
             "StrawHatMaine","TantaiGaming","Bluxxy","SUB2GAMERROBOT_EXP1","Chandler",
             "NOMOREHACK","BANEXPLOIT","WildDares","BossBuild","GetPranked","EARN_FRUITS",
             "FIGHT4FRUIT","NOEXPLOITER","NOOB2ADMIN","CODESLIDE","ADMINHACKED","ADMINDARES",
             "fruitconcepts","krazydares","TRIPLEABUSE","SEATROLLING","24NOADMIN","REWARDFUN",
-            "NEWTROLL","fudd10_v2","Fudd10","Bignews","SECRET_ADMIN"}
-        for _,c in ipairs(codes) do
+            "NEWTROLL","fudd10_v2","Fudd10","Bignews","SECRET_ADMIN",
+        }
+        for _, c in ipairs(codes) do
             pcall(function() ReplicatedStorage.Remotes.Redeem:InvokeServer(c) end)
         end
     end,
 })
+
 MiscTab:CreateSection("Stats")
 MiscTab:CreateDropdown({
-    Name="Auto Stats", Options={"Off","Melee","Defense","Sword","Gun","Fruit"},
-    CurrentOption="Off", Flag="AutoStats",
+    Name="Auto Stats",
+    Options={"Off","Melee","Defense","Sword","Gun","Fruit"},
+    CurrentOption="Off",
+    Flag="AutoStats",
     Callback=function(v)
         task.spawn(function()
-            local m={Melee="Melee",Defense="Defense",Sword="Sword",Gun="Gun",Fruit="Demon Fruit"}
-            while v~="Off" do
-                pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("AddPoint",m[v],3) end)
+            local m = {Melee="Melee",Defense="Defense",Sword="Sword",Gun="Gun",Fruit="Demon Fruit"}
+            local sel = tostring(v)
+            while sel ~= "Off" do
+                pcall(function() ReplicatedStorage.Remotes.CommF_:InvokeServer("AddPoint",m[sel],3) end)
                 task.wait(0.5)
+                -- re-read in case toggle changed
+                sel = tostring(v)
             end
         end)
     end,
