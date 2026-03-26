@@ -867,176 +867,104 @@ local function RunAutoFarm()
     end)
 end
 
--- ════════════════════════════════════
---  BOUNTY HUNT
--- ════════════════════════════════════
-local BH = {Active=false, Status="Idle", Target=""}
-local BH_HitDelay   = 0.15
-local BH_Hits       = 1
+local BH = {Status="Idle", Target=""}
+local BH_tpConn     = nil
+local BH_atkConn    = nil
+local BH_mucTieu    = nil
 local BH_ReturnPos  = nil
+local BH_TPActive   = false
+local BH_AtkActive  = false
 
-local SafeZoneNames = {
-    "Starter", "Town", "Marine", "Skypiea", "Spawn", "Cafe",
-    "Port", "Base", "Hub", "Safe", "Village",
-}
-
-local function IsInSafeZone(character)
-    if not character then return true end
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return true end
-    for _, region in ipairs(workspace:GetDescendants()) do
-        if region:IsA("BasePart") then
-            local n = region.Name
-            for _, sz in ipairs(SafeZoneNames) do
-                if string.find(string.lower(n), string.lower(sz)) then
-                    local relPos = region.CFrame:PointToObjectSpace(hrp.Position)
-                    local half   = region.Size / 2
-                    if math.abs(relPos.X) < half.X and math.abs(relPos.Y) < half.Y and math.abs(relPos.Z) < half.Z then
-                        return true
-                    end
-                end
-            end
-        end
-    end
-    return false
+local function StopBHTP()
+    if BH_tpConn then BH_tpConn:Disconnect(); BH_tpConn = nil end
+    BH_TPActive = false
 end
 
-local function CanDamagePlayer(p)
-    if p == LocalPlayer then return false end
-    if not p.Character then return false end
-    local hu = p.Character:FindFirstChildOfClass("Humanoid")
-    if not hu or hu.Health <= 0 then return false end
-    if IsInSafeZone(p.Character) then return false end
-    local ok, pvp = pcall(function() return p.Character:GetAttribute("PVPEnabled") end)
-    if ok and pvp == false then return false end
-    return true
+local function StopBHAtk()
+    if BH_atkConn then BH_atkConn:Disconnect(); BH_atkConn = nil end
+    BH_AtkActive = false
 end
 
-local function FindBountyTarget(targetName)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            if targetName == "" or p.Name == targetName then
-                if CanDamagePlayer(p) then
-                    return p
-                end
-            end
-        end
-    end
-    return nil
+local function StopBH()
+    StopBHTP()
+    StopBHAtk()
+    BH_mucTieu  = nil
+    BH_ReturnPos = nil
+    BH.Status = "Idle"
+    BH.Target = ""
 end
 
-local _bhStickyConn = nil
-local _bhHitCount   = 0
-
-local function StopBHSticky()
-    if _bhStickyConn then _bhStickyConn:Disconnect(); _bhStickyConn = nil end
-end
-
-local function BountyHitPlayer(target)
-    if not target or not target.Character then return end
-    local tHrp = target.Character:FindFirstChild("HumanoidRootPart"); if not tHrp then return end
-    local myHrp = GetHRP(); if not myHrp then return end
-
-    BH_ReturnPos = myHrp.CFrame
-    _bhHitCount  = 0
-
-    StopBHSticky()
-
-    -- Expand target hitbox to guarantee collision — same as mob hitbox logic
-    pcall(function()
-        tHrp.Size = Vector3.new(999, 999, 999)
-        tHrp.CanCollide = false
-        local tHead = target.Character:FindFirstChild("Head")
-        if tHead then tHead.CanCollide = false end
-    end)
-
-    -- Sticky loop: glue ourselves ON top of the target every frame and
-    -- keep firing remotes until BH_Hits confirmed hits land, then return.
-    local hitRegistered = false
-    _bhStickyConn = RunService.Heartbeat:Connect(function()
-        if not BH.Active then StopBHSticky(); return end
-
-        local tc = target.Character
-        if not tc or not tc.Parent then StopBHSticky(); hitRegistered = true; return end
-        local thu = tc:FindFirstChildOfClass("Humanoid")
-        if not thu or thu.Health <= 0 then StopBHSticky(); hitRegistered = true; return end
-
-        local tPos = tHrp.Position
-        local hrp  = GetHRP(); if not hrp then return end
-
-        -- Glue our position onto the target so we are always on them
-        hrp.CFrame = CFrame.new(tPos.X, math.max(tPos.Y, 4) + 3, tPos.Z)
-        hrp.CanCollide = false
-        pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
-
-        local tHead = tc:FindFirstChild("Head") or tHrp
-
-        -- Fire attack remotes every frame while stuck
-        pcall(function() if RegAttack then RegAttack:FireServer(1e-9) end end)
+-- Stepped TP: glues your HRP onto the target every physics step
+local function StartBHTP(target)
+    StopBHTP()
+    BH_mucTieu  = target
+    BH_TPActive = true
+    BH_tpConn = RunService.Stepped:Connect(function()
         pcall(function()
-            if RegHit then
-                RegHit:FireServer(tHead, {{tc, tHead}})
-            end
+            if not BH_TPActive or not BH_mucTieu then return end
+            local nhanVat     = LocalPlayer.Character
+            local nhanVatDich = BH_mucTieu.Character
+            if not nhanVat or not nhanVatDich then return end
+            local chanToi  = nhanVat:FindFirstChild("HumanoidRootPart")
+            local chanDich = nhanVatDich:FindFirstChild("HumanoidRootPart")
+            if not chanToi or not chanDich then return end
+            local viTriDich = chanDich.Position
+            chanToi.CFrame = CFrame.new(viTriDich.X, viTriDich.Y, viTriDich.Z)
+            chanToi.AssemblyLinearVelocity = Vector3.zero
         end)
-
-        _bhHitCount = _bhHitCount + 1
-
-        -- Once we've fired enough hits, consider it landed and return
-        -- We count frames rather than relying on server ack since remotes are async.
-        -- 8 frames at 60fps ≈ 0.13s — enough for at least 1 server-confirmed hit.
-        if _bhHitCount >= 8 then
-            StopBHSticky()
-            hitRegistered = true
-        end
     end)
-
-    -- Wait for sticky loop to finish (max 5 seconds safety timeout)
-    local elapsed = 0
-    while not hitRegistered and elapsed < 5 do
-        task.wait(0.05)
-        elapsed = elapsed + 0.05
-    end
-    StopBHSticky()
-
-    task.wait(0.1)
-
-    -- Triple-set return to our saved position
-    local myHrp2 = GetHRP()
-    if myHrp2 and BH_ReturnPos then
-        myHrp2.CFrame = BH_ReturnPos
-        task.wait()
-        myHrp2 = GetHRP(); if myHrp2 then myHrp2.CFrame = BH_ReturnPos end
-        task.wait()
-        myHrp2 = GetHRP(); if myHrp2 then myHrp2.CFrame = BH_ReturnPos end
-    end
 end
 
-local function RunBountyHunt(targetName)
-    if BH.Active then return end
-    BH.Active = true
+-- Auto attack loop: fires RegisterAttack + RegisterHit on the target every frame
+local function StartBHAtk(target)
+    StopBHAtk()
+    BH_AtkActive = true
+    BH_atkConn = RunService.Heartbeat:Connect(function()
+        pcall(function()
+            if not BH_AtkActive or not target or not target.Character then return end
+            local tc   = target.Character
+            local hu   = tc:FindFirstChildOfClass("Humanoid")
+            if not hu or hu.Health <= 0 then return end
+            local tHead = tc:FindFirstChild("Head") or tc:FindFirstChild("HumanoidRootPart")
+            if not tHead then return end
+            if RegAttack then RegAttack:FireServer(1e-9) end
+            if RegHit    then RegHit:FireServer(tHead, {{tc, tHead}}) end
+        end)
+    end)
+end
+
+-- Save current position then start sticking + attacking
+local function BH_Engage(target)
+    if not target or not target.Character then
+        Rayfield:Notify({Title="Bounty Hunt", Content="Target has no character.", Duration=2})
+        return
+    end
+    local hrp = GetHRP(); if not hrp then return end
+    BH_ReturnPos = hrp.CFrame
+    BH.Target    = target.Name
+    BH.Status    = "Locked: " .. target.Name
+    StartBHTP(target)
+    StartBHAtk(target)
+end
+
+-- Stop sticking and teleport back to saved position
+local function BH_Return()
+    StopBHTP()
+    StopBHAtk()
+    BH.Status = "Returning..."
+    BH.Target = ""
     task.spawn(function()
-        while BH.Active do
-            local target = FindBountyTarget(targetName or "")
-            if not target then
-                BH.Status = "Searching..."
-                task.wait(1)
-                continue
-            end
-
-            BH.Status = "Locking onto: " .. target.Name
-            BH.Target = target.Name
-
-            local ok, err = pcall(BountyHitPlayer, target)
-            if not ok then
-                BH.Status = "Error: " .. tostring(err)
-                StopBHSticky()
-            end
-
-            task.wait(0.3)
+        task.wait(0.05)
+        local hrp = GetHRP()
+        if hrp and BH_ReturnPos then
+            hrp.CFrame = BH_ReturnPos
+            task.wait()
+            hrp = GetHRP(); if hrp then hrp.CFrame = BH_ReturnPos end
+            task.wait()
+            hrp = GetHRP(); if hrp then hrp.CFrame = BH_ReturnPos end
         end
-        StopBHSticky()
+        BH_ReturnPos = nil
         BH.Status = "Idle"
-        BH.Target = ""
     end)
 end
 
@@ -1270,54 +1198,84 @@ ESPTab:CreateToggle({
 })
 
 local BHTab = Window:CreateTab("Bounty Hunt", 4483362458)
-BHTab:CreateSection("Settings")
-local _bhTargetName = ""
-BHTab:CreateInput({
-    Name="Target Player (blank = any)", PlaceholderText="Leave blank for any PVP player...",
-    RemoveTextAfterFocusLost=false, Flag="BHTarget",
-    Callback=function(v) _bhTargetName=tostring(v) end,
-})
-BHTab:CreateSlider({
-    Name="Hits Per Visit", Range={1,10}, Increment=1, Suffix=" hits",
-    CurrentValue=1, Flag="BHHits",
-    Callback=function(v) BH_Hits=v end,
-})
-BHTab:CreateSlider({
-    Name="Hit Delay", Range={1,30}, Increment=1, Suffix=" x0.01s",
-    CurrentValue=15, Flag="BHDelay",
-    Callback=function(v) BH_HitDelay=v*0.01 end,
-})
-BHTab:CreateSection("Control")
-BHTab:CreateToggle({
-    Name="Auto Bounty Hunt", CurrentValue=false, Flag="BHActive",
-    Callback=function(v)
-        if v then
-            RunBountyHunt(_bhTargetName)
-        else
-            BH.Active=false
-        end
-    end,
+BHTab:CreateSection("Select Target")
+
+local _bhSelectedPlayer = "(none)"
+local function GetPVPPlayerNames()
+    local n = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then table.insert(n, p.Name) end
+    end
+    return #n > 0 and n or {"(none)"}
+end
+local _bhInitNames = GetPVPPlayerNames()
+_bhSelectedPlayer = _bhInitNames[1]
+
+local _bhDropdown
+_bhDropdown = BHTab:CreateDropdown({
+    Name="Target Player", Options=_bhInitNames, CurrentOption=_bhInitNames[1],
+    Flag="BHPlayerDrop",
+    Callback=function(v) _bhSelectedPlayer=tostring(v) end,
 })
 BHTab:CreateButton({
-    Name="Hunt Once (Manual)",
+    Name="Refresh Player List",
+    Callback=function()
+        local n = GetPVPPlayerNames()
+        _bhSelectedPlayer = n[1]
+        Rayfield:Notify({Title="Bounty Hunt", Content="Refreshed. "..#n.." player(s).", Duration=2})
+    end,
+})
+
+BHTab:CreateSection("Control")
+BHTab:CreateButton({
+    Name="Engage (TP + Auto Attack)",
     Callback=function()
         task.spawn(function()
-            local target = FindBountyTarget(_bhTargetName)
-            if not target then
-                Rayfield:Notify({Title="Bounty Hunt", Content="No valid PVP target found.", Duration=3})
+            if _bhSelectedPlayer == "" or _bhSelectedPlayer == "(none)" then
+                Rayfield:Notify({Title="Bounty Hunt", Content="Select a target first.", Duration=2})
                 return
             end
-            Rayfield:Notify({Title="Bounty Hunt", Content="Hitting: "..target.Name, Duration=2})
-            pcall(BountyHitPlayer, target)
+            local target
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Name == _bhSelectedPlayer and p ~= LocalPlayer then
+                    target = p; break
+                end
+            end
+            if not target then
+                Rayfield:Notify({Title="Bounty Hunt", Content="Player not found.", Duration=2})
+                return
+            end
+            if not target.Character then
+                Rayfield:Notify({Title="Bounty Hunt", Content="Target has no character.", Duration=2})
+                return
+            end
+            BH_Engage(target)
+            Rayfield:Notify({Title="Bounty Hunt", Content="Locked onto "..target.Name..". Press Return to go back.", Duration=3})
         end)
     end,
 })
+BHTab:CreateButton({
+    Name="Return (Stop + Go Back)",
+    Callback=function()
+        task.spawn(function()
+            BH_Return()
+        end)
+    end,
+})
+BHTab:CreateButton({
+    Name="Stop Attack Only",
+    Callback=function()
+        StopBHAtk()
+        BH.Status = BH_TPActive and ("TP only: "..BH.Target) or "Idle"
+    end,
+})
+
 BHTab:CreateSection("Status")
 local BHStatusLabel = BHTab:CreateParagraph({Title="Status", Content="Idle"})
 local BHTargetLabel = BHTab:CreateParagraph({Title="Target", Content="none"})
 task.spawn(function()
     while true do
-        task.wait(1)
+        task.wait(0.5)
         pcall(function()
             pcall(function() BHStatusLabel:Set({Title="Status", Content=BH.Status or "Idle"}) end)
             pcall(function() BHTargetLabel:Set({Title="Target", Content=BH.Target~="" and BH.Target or "none"}) end)
@@ -1325,8 +1283,8 @@ task.spawn(function()
     end
 end)
 BHTab:CreateParagraph({
-    Title="How it works",
-    Content="Finds players outside safe zones with PVP on. TPs to them, fires hits, then TPs back to your original position. Set target name or leave blank for any valid target.",
+    Title="How to use",
+    Content="1. Select player from dropdown\n2. Press Engage — TPs you onto them every frame (Stepped) and auto attacks\n3. Press Return — stops TP + attack and sends you back to where you were",
 })
 
 local MiscTab = Window:CreateTab("Misc", 4483362458)
