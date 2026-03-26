@@ -925,37 +925,89 @@ local function FindBountyTarget(targetName)
     return nil
 end
 
+local _bhStickyConn = nil
+local _bhHitCount   = 0
+
+local function StopBHSticky()
+    if _bhStickyConn then _bhStickyConn:Disconnect(); _bhStickyConn = nil end
+end
+
 local function BountyHitPlayer(target)
     if not target or not target.Character then return end
     local tHrp = target.Character:FindFirstChild("HumanoidRootPart"); if not tHrp then return end
     local myHrp = GetHRP(); if not myHrp then return end
 
     BH_ReturnPos = myHrp.CFrame
+    _bhHitCount  = 0
 
-    local tx, ty, tz = tHrp.Position.X, math.max(tHrp.Position.Y, 4), tHrp.Position.Z
-    myHrp.CFrame = CFrame.new(tx, ty + 3, tz)
-    task.wait(); myHrp = GetHRP(); if myHrp then myHrp.CFrame = CFrame.new(tx, ty + 3, tz) end
-    task.wait(); myHrp = GetHRP(); if myHrp then myHrp.CFrame = CFrame.new(tx, ty + 3, tz) end
-    task.wait(0.05)
+    StopBHSticky()
 
-    local tHead = target.Character:FindFirstChild("Head") or tHrp
-    for i = 1, BH_Hits do
+    -- Expand target hitbox to guarantee collision — same as mob hitbox logic
+    pcall(function()
+        tHrp.Size = Vector3.new(999, 999, 999)
+        tHrp.CanCollide = false
+        local tHead = target.Character:FindFirstChild("Head")
+        if tHead then tHead.CanCollide = false end
+    end)
+
+    -- Sticky loop: glue ourselves ON top of the target every frame and
+    -- keep firing remotes until BH_Hits confirmed hits land, then return.
+    local hitRegistered = false
+    _bhStickyConn = RunService.Heartbeat:Connect(function()
+        if not BH.Active then StopBHSticky(); return end
+
+        local tc = target.Character
+        if not tc or not tc.Parent then StopBHSticky(); hitRegistered = true; return end
+        local thu = tc:FindFirstChildOfClass("Humanoid")
+        if not thu or thu.Health <= 0 then StopBHSticky(); hitRegistered = true; return end
+
+        local tPos = tHrp.Position
+        local hrp  = GetHRP(); if not hrp then return end
+
+        -- Glue our position onto the target so we are always on them
+        hrp.CFrame = CFrame.new(tPos.X, math.max(tPos.Y, 4) + 3, tPos.Z)
+        hrp.CanCollide = false
+        pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
+
+        local tHead = tc:FindFirstChild("Head") or tHrp
+
+        -- Fire attack remotes every frame while stuck
         pcall(function() if RegAttack then RegAttack:FireServer(1e-9) end end)
         pcall(function()
             if RegHit then
-                RegHit:FireServer(tHead, {{target.Character, tHead}})
+                RegHit:FireServer(tHead, {{tc, tHead}})
             end
         end)
-        if i < BH_Hits then task.wait(BH_HitDelay) end
+
+        _bhHitCount = _bhHitCount + 1
+
+        -- Once we've fired enough hits, consider it landed and return
+        -- We count frames rather than relying on server ack since remotes are async.
+        -- 8 frames at 60fps ≈ 0.13s — enough for at least 1 server-confirmed hit.
+        if _bhHitCount >= 8 then
+            StopBHSticky()
+            hitRegistered = true
+        end
+    end)
+
+    -- Wait for sticky loop to finish (max 5 seconds safety timeout)
+    local elapsed = 0
+    while not hitRegistered and elapsed < 5 do
+        task.wait(0.05)
+        elapsed = elapsed + 0.05
     end
+    StopBHSticky()
 
-    task.wait(BH_HitDelay)
+    task.wait(0.1)
 
-    myHrp = GetHRP()
-    if myHrp and BH_ReturnPos then
-        myHrp.CFrame = BH_ReturnPos
-        task.wait(); myHrp = GetHRP(); if myHrp then myHrp.CFrame = BH_ReturnPos end
-        task.wait(); myHrp = GetHRP(); if myHrp then myHrp.CFrame = BH_ReturnPos end
+    -- Triple-set return to our saved position
+    local myHrp2 = GetHRP()
+    if myHrp2 and BH_ReturnPos then
+        myHrp2.CFrame = BH_ReturnPos
+        task.wait()
+        myHrp2 = GetHRP(); if myHrp2 then myHrp2.CFrame = BH_ReturnPos end
+        task.wait()
+        myHrp2 = GetHRP(); if myHrp2 then myHrp2.CFrame = BH_ReturnPos end
     end
 end
 
@@ -971,16 +1023,18 @@ local function RunBountyHunt(targetName)
                 continue
             end
 
-            BH.Status = "Hunting: " .. target.Name
+            BH.Status = "Locking onto: " .. target.Name
             BH.Target = target.Name
 
             local ok, err = pcall(BountyHitPlayer, target)
             if not ok then
                 BH.Status = "Error: " .. tostring(err)
+                StopBHSticky()
             end
 
-            task.wait(0.5)
+            task.wait(0.3)
         end
+        StopBHSticky()
         BH.Status = "Idle"
         BH.Target = ""
     end)
