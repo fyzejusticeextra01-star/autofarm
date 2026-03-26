@@ -894,7 +894,8 @@ local function StopBH()
     BH.Target = ""
 end
 
--- Stepped TP: glues your HRP onto the target every physics step
+-- Stepped TP: glues your HRP onto the target every physics step.
+-- Also claims simulation ownership so BF server correction cannot override us.
 local function StartBHTP(target)
     StopBHTP()
     BH_mucTieu  = target
@@ -909,26 +910,58 @@ local function StartBHTP(target)
             local chanDich = nhanVatDich:FindFirstChild("HumanoidRootPart")
             if not chanToi or not chanDich then return end
             local viTriDich = chanDich.Position
+            -- Claim physics ownership so server cannot correct our position
+            pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
             chanToi.CFrame = CFrame.new(viTriDich.X, viTriDich.Y, viTriDich.Z)
             chanToi.AssemblyLinearVelocity = Vector3.zero
+            chanToi.CanCollide = false
         end)
     end)
 end
 
--- Auto attack loop: fires RegisterAttack + RegisterHit on the target every frame
+-- T-Rex M1 auto attack for PvP.
+-- BF player damage does NOT use RegisterHit — it uses the equipped tool's own
+-- RemoteEvent (LeftClickRemote / RemoteEvent inside the tool), firing the
+-- target's HRP as the argument, exactly like a real M1 click.
+local function GetEquippedToolRemote()
+    local c = LocalPlayer.Character; if not c then return nil end
+    for _, v in ipairs(c:GetChildren()) do
+        if v:IsA("Tool") then
+            -- Try common remote names used by BF melee/sword tools
+            return v:FindFirstChild("LeftClickRemote")
+                or v:FindFirstChild("RemoteEvent")
+                or v:FindFirstChild("RemoteFunction")
+        end
+    end
+    return nil
+end
+
 local function StartBHAtk(target)
     StopBHAtk()
     BH_AtkActive = true
     BH_atkConn = RunService.Heartbeat:Connect(function()
         pcall(function()
             if not BH_AtkActive or not target or not target.Character then return end
-            local tc   = target.Character
-            local hu   = tc:FindFirstChildOfClass("Humanoid")
+            local tc = target.Character
+            local hu = tc:FindFirstChildOfClass("Humanoid")
             if not hu or hu.Health <= 0 then return end
-            local tHead = tc:FindFirstChild("Head") or tc:FindFirstChild("HumanoidRootPart")
-            if not tHead then return end
-            if RegAttack then RegAttack:FireServer(1e-9) end
-            if RegHit    then RegHit:FireServer(tHead, {{tc, tHead}}) end
+            local tHrp = tc:FindFirstChild("HumanoidRootPart"); if not tHrp then return end
+
+            -- Method 1: tool LeftClickRemote / RemoteEvent (T-Rex M1 & most melee)
+            local remote = GetEquippedToolRemote()
+            if remote then
+                -- Standard BF M1 signature: FireServer(targetHRP, direction)
+                pcall(function() remote:FireServer(tHrp, Vector3.new(0,0,-1)) end)
+                -- Some tools use (direction, hitInstance) instead
+                pcall(function() remote:FireServer(Vector3.new(0,0,-1), tHrp) end)
+            end
+
+            -- Method 2: mob attack remotes as fallback (works if server validates them for players too)
+            if RegAttack then pcall(function() RegAttack:FireServer(1e-9) end) end
+            if RegHit then
+                local tHead = tc:FindFirstChild("Head") or tHrp
+                pcall(function() RegHit:FireServer(tHead, {{tc, tHead}}) end)
+            end
         end)
     end)
 end
@@ -943,6 +976,9 @@ local function BH_Engage(target)
     BH_ReturnPos = hrp.CFrame
     BH.Target    = target.Name
     BH.Status    = "Locked: " .. target.Name
+    -- Equip weapon so tool remote exists when attack loop fires
+    pcall(function() EquipWeapon(GetWeaponName()) end)
+    task.wait(0.1)
     StartBHTP(target)
     StartBHAtk(target)
 end
