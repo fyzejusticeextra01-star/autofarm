@@ -892,11 +892,13 @@ local function StopBH()
     BH.Target  = ""
 end
 
+local BH_TWEEN_SPEED = 12  -- studs per second lerp — raise for faster, lower for smoother
+
 local function StartBHTP(target)
     StopBHTP()
     BH_mucTieu = target
     BH_TPOn    = true
-    BH_tpConn  = RunService.Stepped:Connect(function()
+    BH_tpConn  = RunService.Stepped:Connect(function(_, dt)
         pcall(function()
             if not BH_TPOn or not BH_mucTieu then return end
             local myChar  = LocalPlayer.Character
@@ -905,11 +907,22 @@ local function StartBHTP(target)
             local myHRP  = myChar:FindFirstChild("HumanoidRootPart")
             local tgtHRP = tgtChar:FindFirstChild("HumanoidRootPart")
             if not myHRP or not tgtHRP then return end
+
             pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
-            local p = tgtHRP.Position
-            myHRP.CFrame = CFrame.new(p.X, p.Y, p.Z)
+
+            local dest = tgtHRP.Position
+            local cur  = myHRP.Position
+
+            -- Lerp toward target position each tick — alpha scales with dt so
+            -- speed is frame-rate independent. At BH_TWEEN_SPEED=12 it closes
+            -- ~50 studs in about 0.5s and sticks once within ~0.5 studs.
+            local alpha = math.min(1, BH_TWEEN_SPEED * dt)
+            local next  = cur:Lerp(dest, alpha)
+
+            myHRP.CFrame = CFrame.new(next)
             myHRP.AssemblyLinearVelocity = Vector3.zero
             myHRP.CanCollide = false
+
             local tool = myChar:FindFirstChildOfClass("Tool")
             if tool then
                 local handle = tool:FindFirstChild("Handle") or tool:FindFirstChild("Blade")
