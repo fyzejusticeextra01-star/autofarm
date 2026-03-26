@@ -868,140 +868,102 @@ local function RunAutoFarm()
 end
 
 local BH = {Status="Idle", Target=""}
-local BH_tpConn     = nil
-local BH_atkConn    = nil
-local BH_mucTieu    = nil
-local BH_ReturnPos  = nil
-local BH_TPActive   = false
-local BH_AtkActive  = false
+local BH_tpConn  = nil
+local BH_atkConn = nil
+local BH_mucTieu = nil
+local BH_TPOn    = false
+local BH_AtkOn   = false
 
 local function StopBHTP()
     if BH_tpConn then BH_tpConn:Disconnect(); BH_tpConn = nil end
-    BH_TPActive = false
+    BH_TPOn = false
 end
 
 local function StopBHAtk()
     if BH_atkConn then BH_atkConn:Disconnect(); BH_atkConn = nil end
-    BH_AtkActive = false
+    BH_AtkOn = false
 end
 
 local function StopBH()
     StopBHTP()
     StopBHAtk()
-    BH_mucTieu  = nil
-    BH_ReturnPos = nil
-    BH.Status = "Idle"
-    BH.Target = ""
+    BH_mucTieu = nil
+    BH.Status  = "Idle"
+    BH.Target  = ""
 end
 
--- Stepped TP: glues your HRP onto the target every physics step.
--- Also claims simulation ownership so BF server correction cannot override us.
 local function StartBHTP(target)
     StopBHTP()
-    BH_mucTieu  = target
-    BH_TPActive = true
-    BH_tpConn = RunService.Stepped:Connect(function()
+    BH_mucTieu = target
+    BH_TPOn    = true
+    BH_tpConn  = RunService.Stepped:Connect(function()
         pcall(function()
-            if not BH_TPActive or not BH_mucTieu then return end
-            local nhanVat     = LocalPlayer.Character
-            local nhanVatDich = BH_mucTieu.Character
-            if not nhanVat or not nhanVatDich then return end
-            local chanToi  = nhanVat:FindFirstChild("HumanoidRootPart")
-            local chanDich = nhanVatDich:FindFirstChild("HumanoidRootPart")
-            if not chanToi or not chanDich then return end
-            local viTriDich = chanDich.Position
-            -- Claim physics ownership so server cannot correct our position
+            if not BH_TPOn or not BH_mucTieu then return end
+            local myChar  = LocalPlayer.Character
+            local tgtChar = BH_mucTieu.Character
+            if not myChar or not tgtChar then return end
+            local myHRP  = myChar:FindFirstChild("HumanoidRootPart")
+            local tgtHRP = tgtChar:FindFirstChild("HumanoidRootPart")
+            if not myHRP or not tgtHRP then return end
             pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
-            chanToi.CFrame = CFrame.new(viTriDich.X, viTriDich.Y, viTriDich.Z)
-            chanToi.AssemblyLinearVelocity = Vector3.zero
-            chanToi.CanCollide = false
+            local p = tgtHRP.Position
+            myHRP.CFrame = CFrame.new(p.X, p.Y, p.Z)
+            myHRP.AssemblyLinearVelocity = Vector3.zero
+            myHRP.CanCollide = false
+            local tool = myChar:FindFirstChildOfClass("Tool")
+            if tool then
+                local handle = tool:FindFirstChild("Handle") or tool:FindFirstChild("Blade")
+                if handle then
+                    handle.Size       = Vector3.new(65, 65, 65)
+                    handle.CanCollide = false
+                end
+            end
         end)
     end)
-end
-
--- T-Rex M1 auto attack for PvP.
--- BF player damage does NOT use RegisterHit — it uses the equipped tool's own
--- RemoteEvent (LeftClickRemote / RemoteEvent inside the tool), firing the
--- target's HRP as the argument, exactly like a real M1 click.
-local function GetEquippedToolRemote()
-    local c = LocalPlayer.Character; if not c then return nil end
-    for _, v in ipairs(c:GetChildren()) do
-        if v:IsA("Tool") then
-            -- Try common remote names used by BF melee/sword tools
-            return v:FindFirstChild("LeftClickRemote")
-                or v:FindFirstChild("RemoteEvent")
-                or v:FindFirstChild("RemoteFunction")
-        end
-    end
-    return nil
 end
 
 local function StartBHAtk(target)
     StopBHAtk()
-    BH_AtkActive = true
-    BH_atkConn = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            if not BH_AtkActive or not target or not target.Character then return end
-            local tc = target.Character
-            local hu = tc:FindFirstChildOfClass("Humanoid")
-            if not hu or hu.Health <= 0 then return end
-            local tHrp = tc:FindFirstChild("HumanoidRootPart"); if not tHrp then return end
-
-            -- Method 1: tool LeftClickRemote / RemoteEvent (T-Rex M1 & most melee)
-            local remote = GetEquippedToolRemote()
-            if remote then
-                -- Standard BF M1 signature: FireServer(targetHRP, direction)
-                pcall(function() remote:FireServer(tHrp, Vector3.new(0,0,-1)) end)
-                -- Some tools use (direction, hitInstance) instead
-                pcall(function() remote:FireServer(Vector3.new(0,0,-1), tHrp) end)
-            end
-
-            -- Method 2: mob attack remotes as fallback (works if server validates them for players too)
-            if RegAttack then pcall(function() RegAttack:FireServer(1e-9) end) end
-            if RegHit then
-                local tHead = tc:FindFirstChild("Head") or tHrp
-                pcall(function() RegHit:FireServer(tHead, {{tc, tHead}}) end)
-            end
-        end)
+    BH_AtkOn = true
+    task.spawn(function()
+        while BH_AtkOn do
+            pcall(function()
+                if not target or not target.Character then return end
+                local hu = target.Character:FindFirstChildOfClass("Humanoid")
+                if not hu or hu.Health <= 0 then return end
+                local myChar = LocalPlayer.Character; if not myChar then return end
+                local tool   = myChar:FindFirstChildOfClass("Tool"); if not tool then return end
+                local remote = tool:FindFirstChild("LeftClickRemote") or tool:FindFirstChild("RemoteEvent")
+                if not remote then return end
+                for i = 1, 4 do
+                    remote:FireServer(Vector3.new(0, 0, -1), 1)
+                end
+            end)
+            task.wait(0.01)
+        end
     end)
 end
 
--- Save current position then start sticking + attacking
 local function BH_Engage(target)
     if not target or not target.Character then
         Rayfield:Notify({Title="Bounty Hunt", Content="Target has no character.", Duration=2})
         return
     end
-    local hrp = GetHRP(); if not hrp then return end
-    BH_ReturnPos = hrp.CFrame
-    BH.Target    = target.Name
-    BH.Status    = "Locked: " .. target.Name
-    -- Equip weapon so tool remote exists when attack loop fires
+    BH.Target = target.Name
+    BH.Status = "Locked: " .. target.Name
     pcall(function() EquipWeapon(GetWeaponName()) end)
-    task.wait(0.1)
+    task.wait(0.15)
     StartBHTP(target)
     StartBHAtk(target)
 end
 
--- Stop sticking and teleport back to saved position
-local function BH_Return()
+local function BH_StopTP()
     StopBHTP()
-    StopBHAtk()
-    BH.Status = "Returning..."
-    BH.Target = ""
-    task.spawn(function()
-        task.wait(0.05)
-        local hrp = GetHRP()
-        if hrp and BH_ReturnPos then
-            hrp.CFrame = BH_ReturnPos
-            task.wait()
-            hrp = GetHRP(); if hrp then hrp.CFrame = BH_ReturnPos end
-            task.wait()
-            hrp = GetHRP(); if hrp then hrp.CFrame = BH_ReturnPos end
-        end
-        BH_ReturnPos = nil
-        BH.Status = "Idle"
-    end)
+    BH.Status = BH_AtkOn and "Attacking (no TP)" or "Idle"
+end
+
+local function BH_StopAll()
+    StopBH()
 end
 
 local Window = Rayfield:CreateWindow({
@@ -1281,28 +1243,23 @@ BHTab:CreateButton({
                 Rayfield:Notify({Title="Bounty Hunt", Content="Player not found.", Duration=2})
                 return
             end
-            if not target.Character then
-                Rayfield:Notify({Title="Bounty Hunt", Content="Target has no character.", Duration=2})
-                return
-            end
             BH_Engage(target)
-            Rayfield:Notify({Title="Bounty Hunt", Content="Locked onto "..target.Name..". Press Return to go back.", Duration=3})
+            Rayfield:Notify({Title="Bounty Hunt", Content="Locked onto "..target.Name, Duration=2})
         end)
     end,
 })
 BHTab:CreateButton({
-    Name="Return (Stop + Go Back)",
+    Name="Stop TP",
     Callback=function()
-        task.spawn(function()
-            BH_Return()
-        end)
+        BH_StopTP()
+        Rayfield:Notify({Title="Bounty Hunt", Content="TP stopped. Still attacking.", Duration=2})
     end,
 })
 BHTab:CreateButton({
-    Name="Stop Attack Only",
+    Name="Stop All",
     Callback=function()
-        StopBHAtk()
-        BH.Status = BH_TPActive and ("TP only: "..BH.Target) or "Idle"
+        BH_StopAll()
+        Rayfield:Notify({Title="Bounty Hunt", Content="Stopped.", Duration=2})
     end,
 })
 
@@ -1320,7 +1277,7 @@ task.spawn(function()
 end)
 BHTab:CreateParagraph({
     Title="How to use",
-    Content="1. Select player from dropdown\n2. Press Engage — TPs you onto them every frame (Stepped) and auto attacks\n3. Press Return — stops TP + attack and sends you back to where you were",
+    Content="1. Select player from dropdown + Refresh\n2. Engage — sticks to them and auto attacks with T-Rex M1\n3. Stop TP — unstick but keep attacking\n4. Stop All — stops everything",
 })
 
 local MiscTab = Window:CreateTab("Misc", 4483362458)
