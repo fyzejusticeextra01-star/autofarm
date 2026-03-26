@@ -935,11 +935,13 @@ local function StartBHAtk(target)
                 local tool   = myChar:FindFirstChildOfClass("Tool"); if not tool then return end
                 local remote = tool:FindFirstChild("LeftClickRemote") or tool:FindFirstChild("RemoteEvent")
                 if not remote then return end
-                for i = 1, 4 do
-                    remote:FireServer(Vector3.new(0, 0, -1), 1)
-                end
+                -- Fire once per burst to mimic a real M1 click timing.
+                -- BF anticheat counts remote calls per second — firing 4x every 0.01s
+                -- is ~400 calls/sec which triggers an instant kick.
+                -- 1 call every 0.15s ≈ ~6-7 hits/sec, well within what the server accepts.
+                remote:FireServer(Vector3.new(0, 0, -1), 1)
             end)
-            task.wait(0.01)
+            task.wait(0.15)
         end
     end)
 end
